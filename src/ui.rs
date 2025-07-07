@@ -142,31 +142,31 @@ impl eframe::App for FileGraphApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(format!("File Graph: {}", self.current_dir.display()));
-                ui.add_space(20.0);
-
-                if ui.button("❌ Exit").clicked() {
-                    self.should_exit = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-
-                ui.add_space(20.0);
-
-                if ui
-                    .button(if self.show_graph_view {
-                        "Close Graph View"
-                    } else {
-                        "Open Graph View"
-                    })
-                    .clicked()
-                {
-                    self.show_graph_view = !self.show_graph_view;
-                    if self.show_graph_view {
-                        self.node_positions.clear();
-                        self.selected_node = None;
-                        self.selected_image = None;
-                        self.selected_file_content = None;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ui.button("❌ Exit").clicked() {
+                        self.should_exit = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                }
+
+                    ui.add_space(20.0);
+
+                    if ui
+                        .button(if self.show_graph_view {
+                            "Close Graph View"
+                        } else {
+                            "Open Graph View"
+                        })
+                        .clicked()
+                    {
+                        self.show_graph_view = !self.show_graph_view;
+                        if self.show_graph_view {
+                            self.node_positions.clear();
+                            self.selected_node = None;
+                            self.selected_image = None;
+                            self.selected_file_content = None;
+                        }
+                    }
+                });
             });
         });
 
