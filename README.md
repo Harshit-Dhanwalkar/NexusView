@@ -8,7 +8,7 @@ NexusView is a desktop application built with Rust and the `egui` framework, des
 
 ## Features
 
-- **Interactive Graph Visualization:** Explore your file connections as a dynamic, zoomable, and pannable graph.
+- **Interactive Graph Visualization:** Explore your file connections as a dynamic, and pannable graph.
 - **Link Graph Mode:** See explicit links between your files (e.g., `[[internal links]]` in Markdown).
 - **Tag Graph Mode:** Discover connections based on shared tags found within your files.
 - **File List and Filtering:** Easily browse all scanned files and filter them by tags.
@@ -63,11 +63,14 @@ Upon launching NexusView with a specified directory, the application will scan i
 - **Top Panel:** Provides options to exit the application and toggle the graph visualization.
 - **Central Panel (Graph View):**
   - **Pan:** Click and drag the background to move the graph.
-  - **Zoom:** Use the scroll wheel to zoom in and out.
   - **Nodes:** Represent your files. Click on a node to select it and view its details in the left panel.
   - **Edges:** Represent connections (links or shared tags) between files.
   - **Graph Type Radio Buttons:** Switch between "Links" (explicit file-to-file links) and "Tags" (files connected by shared tags).
   - **Path Display Toggle:** Switch between displaying full absolute paths or just filenames on the graph nodes.
+
+## Todo
+
+- [ ] Fix graph zooming
 
 ## Contributing
 
