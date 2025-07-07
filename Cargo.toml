@@ -1,0 +1,15 @@
+[package]
+name = "NexusView"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+walkdir = "2.5.0"        # For directory traversal
+petgraph = "0.8.2"       # Graph data structure
+egui = "0.31.1"          # GUI framework
+eframe = "0.31.1"        # Framework for native apps
+serde = { version = "1.0", features = ["derive"] } # For serialization
+serde_json = "1.0.140"   # For JSON handling
+regex = "1.11.1"         # For parsing file links
+image = "0.25.6"         # For image loading and processing
+egui_extras = "0.31.1"   # For better image display in egui
