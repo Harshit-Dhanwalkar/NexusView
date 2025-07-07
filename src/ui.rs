@@ -1,7 +1,7 @@
 // src/ui.rs
 use eframe::{App, egui};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -37,13 +37,14 @@ pub struct FileGraphApp {
     graph_zoom_factor: f32,
     dragged_node: Option<petgraph::graph::NodeIndex>,
     last_drag_pos: Option<egui::Pos2>,
-    current_directory_label: String, // Added for directory display
+    current_directory_label: String,
+    show_images: bool,
+    show_orphans: bool,
 }
 
 impl App for FileGraphApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // Add current directory display at the top
             ui.horizontal(|ui| {
                 ui.label("Scanning directory:");
                 ui.monospace(&self.current_directory_label);
@@ -71,6 +72,8 @@ impl App for FileGraphApp {
                 }
 
                 ui.checkbox(&mut self.show_full_paths, "Show Full Paths");
+                ui.checkbox(&mut self.show_orphans, "Show Orphans");
+                ui.checkbox(&mut self.show_images, "Show Images");
 
                 ui.separator();
 
@@ -102,7 +105,6 @@ impl App for FileGraphApp {
                     ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
                 }
 
-                // Corrected exit button with proper parentheses
                 if ui
                     .add(egui::Button::new("✕ Exit").fill(Color32::from_rgb(200, 80, 80)))
                     .clicked()
@@ -111,7 +113,7 @@ impl App for FileGraphApp {
                 }
             });
 
-            // Physics controls section at bottom
+            // Physics controls section
             ui.separator();
             ui.horizontal(|ui| {
                 ui.group(|ui| {
@@ -188,9 +190,24 @@ impl App for FileGraphApp {
             self.file_graph.build_from_scanner(&scanner_locked);
             self.tag_graph.build_from_tags(&scanner_locked);
 
+            // node filtering logic:
             let (nodes_to_draw, edges_to_draw) = match self.current_graph_mode {
                 GraphMode::Links => {
-                    let nodes: Vec<_> = self.file_graph.node_indices.values().cloned().collect();
+                    let nodes: Vec<_> = self
+                        .file_graph
+                        .node_indices
+                        .values()
+                        .filter(|&&idx| {
+                            if !self.show_orphans {
+                                // Only show nodes with connections
+                                self.file_graph.graph.neighbors(idx).count() > 0
+                            } else {
+                                true
+                            }
+                        })
+                        .cloned()
+                        .collect();
+
                     let edges: Vec<_> = self
                         .file_graph
                         .graph
@@ -214,6 +231,12 @@ impl App for FileGraphApp {
                     let mut nodes = Vec::new();
                     let mut edges = Vec::new();
 
+                    // Add all file nodes when show_orphans is true
+                    if self.show_orphans {
+                        nodes.extend(self.tag_graph.file_node_indices.values());
+                    }
+
+                    // Add tagged files
                     for (file_path, &file_node_idx) in &self.tag_graph.file_node_indices {
                         if let Some(tags_for_file) = scanner_locked.tags.get(file_path) {
                             if tags_for_file
@@ -225,7 +248,8 @@ impl App for FileGraphApp {
                         }
                     }
 
-                    for (tag_name, &tag_node_idx) in &filtered_tag_nodes {
+                    // Add tags and their edges
+                    for (_, &tag_node_idx) in &filtered_tag_nodes {
                         nodes.push(tag_node_idx);
                         for edge_ref in self.tag_graph.graph.edges(tag_node_idx) {
                             edges.push((edge_ref.source(), edge_ref.target()));
@@ -237,9 +261,11 @@ impl App for FileGraphApp {
 
             for node_idx in &nodes_to_draw {
                 if !self.physics_simulator.node_positions.contains_key(node_idx) {
-                    let mut rng = rand::thread_rng();
-                    let random_pos =
-                        egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                    let mut rng = rand::rng();
+                    let random_pos = egui::vec2(
+                        rng.random_range(-100.0..100.0),
+                        rng.random_range(-100.0..100.0),
+                    );
                     self.physics_simulator
                         .node_positions
                         .insert(*node_idx, random_pos);
@@ -319,9 +345,47 @@ impl App for FileGraphApp {
                         Color32::from_rgb(255, 100, 100)
                     } else {
                         match self.current_graph_mode {
-                            GraphMode::Links => Color32::BLUE,
+                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                GraphNode::File(path) => {
+                                    let path = Path::new(path);
+                                    let is_image = path
+                                        .extension()
+                                        .map(|ext| {
+                                            let ext = ext.to_string_lossy().to_lowercase();
+                                            ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ind"]
+                                                .contains(&ext.as_str())
+                                        })
+                                        .unwrap_or(false);
+
+                                    if is_image {
+                                        Color32::from_rgb(255, 165, 0)
+                                    } else {
+                                        Color32::BLUE
+                                    }
+                                }
+                                GraphNode::Tag(_) => Color32::GREEN,
+                            },
                             GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
-                                GraphNode::File(_) => Color32::BLUE,
+                                GraphNode::File(path) => {
+                                    let is_orphan =
+                                        !scanner_locked.tags.contains_key(Path::new(path));
+                                    let is_image = Path::new(path)
+                                        .extension()
+                                        .map(|ext| {
+                                            let ext = ext.to_string_lossy().to_lowercase();
+                                            ["png", "jpg", "jpeg", "gif", "bmp", "webp"]
+                                                .contains(&ext.as_str())
+                                        })
+                                        .unwrap_or(false);
+
+                                    if is_orphan {
+                                        Color32::GRAY
+                                    } else if is_image {
+                                        Color32::from_rgb(255, 165, 0)
+                                    } else {
+                                        Color32::BLUE
+                                    }
+                                }
                                 GraphNode::Tag(_) => Color32::GREEN,
                             },
                         }
@@ -489,7 +553,6 @@ impl App for FileGraphApp {
 
 impl FileGraphApp {
     pub fn new(scan_dir: PathBuf) -> Self {
-        // Ensure we're only scanning dummy_dir
         let current_dir = scan_dir.join("dummy_dir");
         if !current_dir.exists() {
             std::fs::create_dir_all(&current_dir).expect("Failed to create dummy_dir");
@@ -510,10 +573,13 @@ impl FileGraphApp {
 
         let mut physics_simulator = PhysicsSimulator::new();
         let mut initial_node_layout = HashMap::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for &node_idx in graph.node_indices.values() {
-            let random_pos = egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+            let random_pos = egui::vec2(
+                rng.random_range(-100.0..100.0),
+                rng.random_range(-100.0..100.0),
+            );
             physics_simulator
                 .node_positions
                 .insert(node_idx, random_pos);
@@ -522,8 +588,10 @@ impl FileGraphApp {
 
         for &node_idx in tag_graph.file_node_indices.values() {
             if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos =
-                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                let random_pos = egui::vec2(
+                    rng.random_range(-100.0..100.0),
+                    rng.random_range(-100.0..100.0),
+                );
                 physics_simulator
                     .node_positions
                     .insert(node_idx, random_pos);
@@ -533,8 +601,10 @@ impl FileGraphApp {
 
         for &node_idx in tag_graph.tag_node_indices.values() {
             if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos =
-                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                let random_pos = egui::vec2(
+                    rng.random_range(-100.0..100.0),
+                    rng.random_range(-100.0..100.0),
+                );
                 physics_simulator
                     .node_positions
                     .insert(node_idx, random_pos);
@@ -563,7 +633,9 @@ impl FileGraphApp {
             scan_error: None,
             dragged_node: None,
             last_drag_pos: None,
-            current_directory_label, // Added
+            current_directory_label,
+            show_images: true,
+            show_orphans: true,
         }
     }
 }

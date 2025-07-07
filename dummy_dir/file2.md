@@ -1,5 +1,5 @@
-#tag1
+# This is file 2
 
-# this is file 2
+Tags: #important #docs #tag1
 
 some content here also

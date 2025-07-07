@@ -33,12 +33,23 @@ impl FileGraph {
         self.graph.clear();
         self.node_indices.clear();
 
+        // Add all files as nodes, including orphaned ones
         for (path, _) in &scanner.files {
             let node_data = GraphNode::File(path.display().to_string());
             let node_idx = self.graph.add_node(node_data);
             self.node_indices.insert(path.clone(), node_idx);
         }
 
+        // Add all images as nodes
+        for path in &scanner.images {
+            if !self.node_indices.contains_key(path) {
+                let node_data = GraphNode::File(path.display().to_string());
+                let node_idx = self.graph.add_node(node_data);
+                self.node_indices.insert(path.clone(), node_idx);
+            }
+        }
+
+        // Add links between nodes
         for (source_path, links) in &scanner.files {
             if let Some(&source_idx) = self.node_indices.get(source_path) {
                 for target_path in links {

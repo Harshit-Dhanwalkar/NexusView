@@ -51,39 +51,44 @@ impl FileScanner {
     }
 
     fn traverse_directory(&mut self, path: &Path) -> Result<(), String> {
-        let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+        let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ind"];
         let tag_re = Regex::new(r"#(\w+)").unwrap();
-        let link_re = Regex::new(r"\\[\\[([^\\]]+)\\]\\]").unwrap();
+        let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+)\)|\[\[([^\]]+)\]\]").unwrap();
 
-        for entry_result in fs::read_dir(path).map_err(|e| e.to_string())? {
-            let entry = entry_result.map_err(|e| e.to_string())?;
+        let entries = fs::read_dir(path).map_err(|e| e.to_string())?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
 
-            if path.is_dir() {
-                self.traverse_directory(&path)?;
-            } else if path.is_file() {
-                if let Some(extension) = path.extension() {
-                    let ext_str = extension.to_string_lossy().to_lowercase();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_lowercase();
 
-                    if image_extensions.contains(&ext_str.as_str()) {
+                    if image_extensions.contains(&ext_lower.as_str()) {
+                        self.files.insert(path.clone(), Vec::new());
                         self.images.push(path.clone());
-                    } else if ext_str == "md" || ext_str == "txt" {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let links = link_re
-                                .captures_iter(&content)
-                                .filter_map(|cap| cap.get(1))
-                                .map(|m| PathBuf::from(m.as_str()))
-                                .collect();
-                            self.files.insert(path.clone(), links);
-
-                            let found_tags: Vec<String> = tag_re
-                                .captures_iter(&content)
-                                .filter_map(|cap| cap.get(1))
-                                .map(|m| m.as_str().to_string())
-                                .collect();
-                            if !found_tags.is_empty() {
-                                self.tags.insert(path.clone(), found_tags);
+                    } else if let Ok(content) = fs::read_to_string(&path) {
+                        let mut links = Vec::new();
+                        for cap in link_re.captures_iter(&content) {
+                            if let Some(link) = cap.get(2) {
+                                // Markdown [text](link)
+                                links.push(PathBuf::from(link.as_str()));
+                            } else if let Some(link) = cap.get(3) {
+                                // Wiki [[link]]
+                                links.push(PathBuf::from(link.as_str()));
                             }
+                        }
+
+                        self.files.insert(path.clone(), links);
+
+                        let tags: Vec<_> = tag_re
+                            .captures_iter(&content)
+                            .filter_map(|c| c.get(1))
+                            .map(|m| m.as_str().to_string())
+                            .collect();
+                        if !tags.is_empty() {
+                            self.tags.insert(path.clone(), tags);
                         }
                     }
                 }

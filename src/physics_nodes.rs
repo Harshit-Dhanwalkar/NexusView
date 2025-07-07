@@ -1,5 +1,5 @@
 // src/physics_nodes.rs
-use egui::{Pos2, Vec2};
+use egui::Vec2;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 
