@@ -1,8 +1,10 @@
+// src/ui.rs
 use crate::file_scan;
 use crate::graph;
+use crate::physics_nodes::PhysicsSimulator;
 use eframe::egui;
+use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(PartialEq, Eq, Clone)]
@@ -23,12 +25,14 @@ pub struct FileGraphApp {
     should_exit: bool,
     texture: Option<egui::TextureHandle>,
     tag_filter_input: String,
-    node_positions: HashMap<petgraph::graph::NodeIndex, egui::Pos2>,
+    physics_simulator: PhysicsSimulator,
     zoom_factor: f32,
     pan_offset: egui::Vec2,
     show_graph_view: bool,
     is_dragging: bool,
     show_full_path: bool,
+    dragged_node: Option<NodeIndex>,
+    last_drag_pos: Option<egui::Pos2>,
 }
 
 impl FileGraphApp {
@@ -36,6 +40,9 @@ impl FileGraphApp {
         let current_dir = PathBuf::from(dir_path);
         let mut scanner = file_scan::FileScanner::new(&current_dir);
         scanner.scan();
+
+        println!("Found {} files", scanner.files.len());
+        println!("Found {} images", scanner.images.len());
 
         let mut graph = graph::FileGraph::new();
         graph.build_from_scanner(&scanner);
@@ -55,16 +62,18 @@ impl FileGraphApp {
             should_exit: false,
             texture: None,
             tag_filter_input: String::new(),
-            node_positions: HashMap::new(),
+            physics_simulator: PhysicsSimulator::new(),
             zoom_factor: 1.0,
             pan_offset: egui::Vec2::ZERO,
             show_graph_view: false,
             is_dragging: false,
             show_full_path: false,
+            dragged_node: None,
+            last_drag_pos: None,
         }
     }
 
-    fn load_image(&mut self, _ctx: &egui::Context, path: &PathBuf) -> Option<egui::ColorImage> {
+    fn load_image(&mut self, ctx: &egui::Context, path: &PathBuf) -> Option<egui::ColorImage> {
         if let Ok(image_data) = std::fs::read(path) {
             if let Ok(image) = image::load_from_memory(&image_data) {
                 let size = [image.width() as usize, image.height() as usize];
@@ -102,7 +111,7 @@ impl FileGraphApp {
             GraphViewMode::TagGraph => &self.tag_graph.graph,
         };
 
-        self.node_positions.clear();
+        self.physics_simulator.node_positions.clear();
 
         let num_nodes = current_graph.node_count();
         if num_nodes == 0 {
@@ -125,7 +134,7 @@ impl FileGraphApp {
             let y = row as f32 * spacing;
 
             let pos = egui::pos2(x, y);
-            self.node_positions.insert(node_idx, pos);
+            self.physics_simulator.node_positions.insert(node_idx, pos);
 
             min_x = min_x.min(x);
             min_y = min_y.min(y);
@@ -133,7 +142,25 @@ impl FileGraphApp {
             max_y = max_y.max(y);
         }
 
+        self.physics_simulator.initialize_velocities();
         egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y))
+    }
+
+    fn update_graph_physics(&mut self) {
+        let current_graph = match self.current_graph_mode {
+            GraphViewMode::LinkGraph => &self.graph.graph,
+            GraphViewMode::TagGraph => &self.tag_graph.graph,
+        };
+
+        let edges: Vec<_> = current_graph
+            .edge_indices()
+            .map(|edge| {
+                let (source, target) = current_graph.edge_endpoints(edge).unwrap();
+                (source, target)
+            })
+            .collect();
+
+        self.physics_simulator.update(&edges);
     }
 }
 
@@ -160,7 +187,7 @@ impl eframe::App for FileGraphApp {
                     {
                         self.show_graph_view = !self.show_graph_view;
                         if self.show_graph_view {
-                            self.node_positions.clear();
+                            let _ = self.calculate_initial_node_positions();
                             self.selected_node = None;
                             self.selected_image = None;
                             self.selected_file_content = None;
@@ -360,7 +387,7 @@ impl eframe::App for FileGraphApp {
 
                 let graph_rect = ui.available_rect_before_wrap();
 
-                if changed_mode || self.node_positions.is_empty() {
+                if changed_mode || self.physics_simulator.node_positions.is_empty() {
                     let layout_rect = self.calculate_initial_node_positions();
 
                     if layout_rect == egui::Rect::NOTHING {
@@ -376,7 +403,8 @@ impl eframe::App for FileGraphApp {
 
                 let graph_response = ui.allocate_rect(graph_rect, egui::Sense::drag());
 
-                if graph_response.dragged() {
+                // Handle panning only when not dragging a node
+                if graph_response.dragged() && self.dragged_node.is_none() {
                     self.pan_offset += graph_response.drag_delta();
                 }
 
@@ -398,6 +426,11 @@ impl eframe::App for FileGraphApp {
                     }
                 }
 
+                // Update physics (skip if we're dragging a node)
+                if self.dragged_node.is_none() {
+                    self.update_graph_physics();
+                }
+
                 let painter = ui.painter();
                 let current_graph = match self.current_graph_mode {
                     GraphViewMode::LinkGraph => &self.graph.graph,
@@ -409,11 +442,11 @@ impl eframe::App for FileGraphApp {
                         .to_pos2()
                 };
 
-                // Draw Edges first
+                // Draw edges first
                 for edge in current_graph.raw_edges() {
                     if let (Some(&start_pos), Some(&end_pos)) = (
-                        self.node_positions.get(&edge.source()),
-                        self.node_positions.get(&edge.target()),
+                        self.physics_simulator.node_positions.get(&edge.source()),
+                        self.physics_simulator.node_positions.get(&edge.target()),
                     ) {
                         painter.line_segment(
                             [transform_pos(start_pos), transform_pos(end_pos)],
@@ -422,14 +455,24 @@ impl eframe::App for FileGraphApp {
                     }
                 }
 
-                // Draw Nodes and Labels
+                // Draw nodes and labels
                 let node_radius = 20.0 * self.zoom_factor;
                 for node_idx in current_graph.node_indices() {
-                    if let Some(&center_pos) = self.node_positions.get(&node_idx) {
+                    if let Some(&center_pos) = self.physics_simulator.node_positions.get(&node_idx)
+                    {
                         let actual_center_pos = transform_pos(center_pos);
                         let node_name = &current_graph[node_idx];
                         let display_name = self.get_display_name(node_name);
 
+                        // Draw node
+                        let node_color = if self.selected_node == Some(node_idx.index()) {
+                            egui::Color32::LIGHT_BLUE
+                        } else {
+                            egui::Color32::BLUE
+                        };
+                        painter.circle_filled(actual_center_pos, node_radius, node_color);
+
+                        // Draw label
                         let font_size = 10.0 * self.zoom_factor;
                         let font_id = egui::FontId::proportional(font_size);
                         let galley = painter.layout_no_wrap(
@@ -438,20 +481,11 @@ impl eframe::App for FileGraphApp {
                             egui::Color32::WHITE,
                         );
 
-                        let (node_center, text_pos) = if self.show_full_path {
-                            let node_center = actual_center_pos;
-                            let text_pos = node_center + egui::vec2(0.0, node_radius + 2.0);
-                            (node_center, text_pos)
+                        let text_pos = if self.show_full_path {
+                            actual_center_pos + egui::vec2(0.0, node_radius + 2.0)
                         } else {
-                            (actual_center_pos, actual_center_pos)
+                            actual_center_pos
                         };
-
-                        let node_color = if self.selected_node == Some(node_idx.index()) {
-                            egui::Color32::LIGHT_BLUE
-                        } else {
-                            egui::Color32::BLUE
-                        };
-                        painter.circle_filled(node_center, node_radius, node_color);
 
                         if self.show_full_path {
                             painter.rect_filled(
@@ -465,9 +499,10 @@ impl eframe::App for FileGraphApp {
                         }
                         painter.galley(text_pos, galley.clone(), egui::Color32::WHITE);
 
+                        // Handle interaction
                         let node_rect = if self.show_full_path {
                             egui::Rect::from_center_size(
-                                node_center,
+                                actual_center_pos,
                                 egui::vec2(
                                     galley.size().x.max(node_radius * 2.0),
                                     node_radius * 2.0 + galley.size().y,
@@ -475,7 +510,7 @@ impl eframe::App for FileGraphApp {
                             )
                         } else {
                             egui::Rect::from_center_size(
-                                node_center,
+                                actual_center_pos,
                                 egui::vec2(node_radius * 2.0, node_radius * 2.0),
                             )
                         };
@@ -483,25 +518,33 @@ impl eframe::App for FileGraphApp {
                         let node_response = ui.interact(
                             node_rect,
                             ui.id().with(node_idx.index()),
-                            egui::Sense::click(),
+                            egui::Sense::click_and_drag(),
                         );
+
+                        if node_response.dragged() {
+                            if let Some(last_pos) = self.last_drag_pos {
+                                let delta = node_response.drag_delta() / self.zoom_factor;
+                                if let Some(pos) =
+                                    self.physics_simulator.node_positions.get_mut(&node_idx)
+                                {
+                                    *pos += delta;
+                                    self.physics_simulator
+                                        .node_velocities
+                                        .insert(node_idx, egui::Vec2::ZERO);
+                                }
+                            }
+                            self.dragged_node = Some(node_idx);
+                            self.last_drag_pos = Some(node_response.rect.center());
+                        } else if node_response.drag_released() {
+                            self.dragged_node = None;
+                            self.last_drag_pos = None;
+                        }
 
                         if node_response.clicked() {
                             self.selected_node = Some(node_idx.index());
                             self.selected_image = None;
                             let path_buf = PathBuf::from(node_name);
                             self.selected_file_content = std::fs::read_to_string(&path_buf).ok();
-                        }
-
-                        if node_response.hovered() {
-                            egui::show_tooltip_at_pointer(
-                                ctx,
-                                egui::LayerId::background(),
-                                egui::Id::new("node_tooltip"),
-                                |ui| {
-                                    ui.label(egui::WidgetText::from(node_name));
-                                },
-                            );
                         }
                     }
                 }

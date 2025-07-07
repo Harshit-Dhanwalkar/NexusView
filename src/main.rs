@@ -1,5 +1,6 @@
 mod file_scan;
 mod graph;
+mod physics_nodes;
 mod ui;
 
 use eframe::egui;
