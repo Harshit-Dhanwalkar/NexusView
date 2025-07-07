@@ -1,558 +1,575 @@
 // src/ui.rs
-use crate::file_scan;
-use crate::graph;
-use crate::physics_nodes::PhysicsSimulator;
-use eframe::egui;
-use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
-use std::path::{Path, PathBuf};
+use eframe::{App, egui};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-#[derive(PartialEq, Eq, Clone)]
-pub enum GraphViewMode {
-    LinkGraph,
-    TagGraph,
+use crate::file_scan::FileScanner;
+use crate::graph::{FileGraph, GraphNode, TagGraph};
+use crate::physics_nodes::PhysicsSimulator;
+use egui::{Color32, Sense, Stroke, pos2, vec2};
+use petgraph::visit::EdgeRef;
+use rand::Rng;
+
+#[derive(PartialEq)]
+enum GraphMode {
+    Links,
+    Tags,
 }
 
 pub struct FileGraphApp {
-    scanner: file_scan::FileScanner,
-    graph: graph::FileGraph,
-    tag_graph: graph::TagGraph,
-    current_graph_mode: GraphViewMode,
-    selected_node: Option<usize>,
-    selected_image: Option<(PathBuf, egui::ColorImage)>,
-    selected_file_content: Option<String>,
-    current_dir: PathBuf,
-    should_exit: bool,
-    texture: Option<egui::TextureHandle>,
-    tag_filter_input: String,
+    scan_dir: PathBuf,
+    scanner: Arc<Mutex<FileScanner>>,
+    file_graph: FileGraph,
+    tag_graph: TagGraph,
+    current_graph_mode: GraphMode,
+    show_full_paths: bool,
     physics_simulator: PhysicsSimulator,
-    zoom_factor: f32,
-    pan_offset: egui::Vec2,
-    show_graph_view: bool,
-    is_dragging: bool,
-    show_full_path: bool,
-    dragged_node: Option<NodeIndex>,
+    is_scanning: bool,
+    scan_error: Option<String>,
+    selected_node: Option<petgraph::graph::NodeIndex>,
+    selected_file_content: Option<String>,
+    selected_image: Option<egui::TextureHandle>,
+    tag_filter_input: String,
+    initial_node_layout: HashMap<petgraph::graph::NodeIndex, egui::Vec2>,
+    graph_center_offset: egui::Vec2,
+    graph_zoom_factor: f32,
+    dragged_node: Option<petgraph::graph::NodeIndex>,
     last_drag_pos: Option<egui::Pos2>,
+    current_directory_label: String, // Added for directory display
 }
 
-impl FileGraphApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>, dir_path: &str) -> Self {
-        let current_dir = PathBuf::from(dir_path);
-        let mut scanner = file_scan::FileScanner::new(&current_dir);
-        scanner.scan();
-
-        println!("Found {} files", scanner.files.len());
-        println!("Found {} images", scanner.images.len());
-
-        let mut graph = graph::FileGraph::new();
-        graph.build_from_scanner(&scanner);
-
-        let mut tag_graph = graph::TagGraph::new();
-        tag_graph.build_from_tags(&scanner);
-
-        Self {
-            scanner,
-            graph,
-            tag_graph,
-            current_graph_mode: GraphViewMode::LinkGraph,
-            selected_node: None,
-            selected_image: None,
-            selected_file_content: None,
-            current_dir,
-            should_exit: false,
-            texture: None,
-            tag_filter_input: String::new(),
-            physics_simulator: PhysicsSimulator::new(),
-            zoom_factor: 1.0,
-            pan_offset: egui::Vec2::ZERO,
-            show_graph_view: false,
-            is_dragging: false,
-            show_full_path: false,
-            dragged_node: None,
-            last_drag_pos: None,
-        }
-    }
-
-    fn load_image(&mut self, ctx: &egui::Context, path: &PathBuf) -> Option<egui::ColorImage> {
-        if let Ok(image_data) = std::fs::read(path) {
-            if let Ok(image) = image::load_from_memory(&image_data) {
-                let size = [image.width() as usize, image.height() as usize];
-                let image_buffer = image.to_rgba8();
-                let pixels = image_buffer.as_flat_samples();
-                return Some(egui::ColorImage::from_rgba_unmultiplied(
-                    size,
-                    pixels.as_slice(),
-                ));
-            }
-        }
-        None
-    }
-
-    fn get_display_name(&self, path: &str) -> String {
-        if self.show_full_path {
-            let path_buf = PathBuf::from(path);
-            if let Ok(abs_path) = path_buf.canonicalize() {
-                abs_path.display().to_string()
-            } else {
-                path.to_string()
-            }
-        } else {
-            Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(path)
-                .to_string()
-        }
-    }
-
-    fn calculate_initial_node_positions(&mut self) -> egui::Rect {
-        let current_graph = match self.current_graph_mode {
-            GraphViewMode::LinkGraph => &self.graph.graph,
-            GraphViewMode::TagGraph => &self.tag_graph.graph,
-        };
-
-        self.physics_simulator.node_positions.clear();
-
-        let num_nodes = current_graph.node_count();
-        if num_nodes == 0 {
-            return egui::Rect::NOTHING;
-        }
-
-        let nodes_per_row = (num_nodes as f32).sqrt().ceil() as usize;
-        let spacing = if self.show_full_path { 250.0 } else { 150.0 };
-
-        let mut min_x = f32::MAX;
-        let mut min_y = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut max_y = f32::MIN;
-
-        for (i, node_idx) in current_graph.node_indices().enumerate() {
-            let col = i % nodes_per_row;
-            let row = i / nodes_per_row;
-
-            let x = col as f32 * spacing;
-            let y = row as f32 * spacing;
-
-            let pos = egui::pos2(x, y);
-            self.physics_simulator.node_positions.insert(node_idx, pos);
-
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
-        }
-
-        self.physics_simulator.initialize_velocities();
-        egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y))
-    }
-
-    fn update_graph_physics(&mut self) {
-        let current_graph = match self.current_graph_mode {
-            GraphViewMode::LinkGraph => &self.graph.graph,
-            GraphViewMode::TagGraph => &self.tag_graph.graph,
-        };
-
-        let edges: Vec<_> = current_graph
-            .edge_indices()
-            .map(|edge| {
-                let (source, target) = current_graph.edge_endpoints(edge).unwrap();
-                (source, target)
-            })
-            .collect();
-
-        self.physics_simulator.update(&edges);
-    }
-}
-
-impl eframe::App for FileGraphApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl App for FileGraphApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            // Add current directory display at the top
             ui.horizontal(|ui| {
-                ui.heading(format!("File Graph: {}", self.current_dir.display()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if ui.button("❌ Exit").clicked() {
-                        self.should_exit = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-
-                    ui.add_space(20.0);
-
-                    if ui
-                        .button(if self.show_graph_view {
-                            "Close Graph View"
-                        } else {
-                            "Open Graph View"
-                        })
-                        .clicked()
-                    {
-                        self.show_graph_view = !self.show_graph_view;
-                        if self.show_graph_view {
-                            let _ = self.calculate_initial_node_positions();
-                            self.selected_node = None;
-                            self.selected_image = None;
-                            self.selected_file_content = None;
-                        }
-                    }
-                });
+                ui.label("Scanning directory:");
+                ui.monospace(&self.current_directory_label);
             });
-        });
-
-        let mut clicked_image_path = None;
-
-        egui::SidePanel::left("file_list_panel").show(ctx, |ui| {
-            ui.collapsing("File List", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Filter by tag:");
-                    ui.text_edit_singleline(&mut self.tag_filter_input);
-                });
-
-                let filter_tag_lowercase = self.tag_filter_input.to_lowercase();
-
-                for (path, links) in &self.scanner.files {
-                    let file_tags = self.scanner.tags.get(path);
-                    let display_file = if filter_tag_lowercase.is_empty() {
-                        true
-                    } else {
-                        file_tags.map_or(false, |tags| {
-                            tags.iter()
-                                .any(|tag| tag.to_lowercase().contains(&filter_tag_lowercase))
-                        })
-                    };
-
-                    if display_file {
-                        let mut button_text =
-                            format!("📄 {} ({} links)", path.display(), links.len());
-                        if let Some(tags) = file_tags {
-                            button_text.push_str(&format!(" [{}]", tags.join(", ")));
-                        }
-                        if ui.button(button_text).clicked() {
-                            self.selected_node = match self.current_graph_mode {
-                                GraphViewMode::LinkGraph => {
-                                    self.graph.node_indices().get(path).map(|i| i.index())
-                                }
-                                GraphViewMode::TagGraph => {
-                                    self.tag_graph.node_indices.get(path).map(|i| i.index())
-                                }
-                            };
-                            self.selected_image = None;
-                            self.selected_file_content = std::fs::read_to_string(path).ok();
-                            self.show_graph_view = false;
-                        }
-                    }
-                }
-
-                for path in &self.scanner.images {
-                    if ui.button(format!("🖼️ {}", path.display())).clicked() {
-                        clicked_image_path = Some(path.clone());
-                        self.show_graph_view = false;
-                    }
-                }
-            });
-
-            if let Some(path) = clicked_image_path {
-                if let Some(image) = self.load_image(ctx, &path) {
-                    let texture = ctx.load_texture(
-                        path.display().to_string(),
-                        image.clone(),
-                        Default::default(),
-                    );
-                    self.texture = Some(texture);
-                    self.selected_image = Some((path, image));
-                }
-                self.selected_node = None;
-                self.selected_file_content = None;
-            }
-
             ui.separator();
 
-            if let Some((path, _)) = &self.selected_image {
-                if let Some(texture) = &self.texture {
-                    ui.heading(format!("Image: {}", path.display()));
-                    ui.add_space(5.0);
-                    ui.image(texture);
+            // Main controls row
+            ui.horizontal(|ui| {
+                ui.label("Graph Mode:");
+                if ui
+                    .radio_value(&mut self.current_graph_mode, GraphMode::Links, "Links")
+                    .clicked()
+                {
+                    self.selected_node = None;
+                    self.physics_simulator
+                        .reset_positions(&self.initial_node_layout);
                 }
-            } else if let Some(idx) = self.selected_node {
-                let (graph_to_display_details, _node_indices_map) = match self.current_graph_mode {
-                    GraphViewMode::LinkGraph => (&self.graph.graph, &self.graph.node_indices),
-                    GraphViewMode::TagGraph => {
-                        (&self.tag_graph.graph, &self.tag_graph.node_indices)
-                    }
-                };
-
-                if let Some(node) = graph_to_display_details.node_indices().nth(idx) {
-                    let node_path_str = &graph_to_display_details[node];
-                    let node_path_buf = PathBuf::from(node_path_str);
-
-                    ui.heading(format!("Selected File: {}", node_path_buf.display()));
-
-                    if let Some(tags) = self.scanner.tags.get(&node_path_buf) {
-                        ui.label(format!("Tags: {}", tags.join(", ")));
-                    }
-
-                    if let Some(content) = &self.selected_file_content {
-                        ui.separator();
-                        ui.heading("File Content:");
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut content.as_str())
-                                    .desired_width(f32::INFINITY),
-                            );
-                        });
-                    }
-
-                    ui.separator();
-                    ui.heading("Connections:");
-                    match self.current_graph_mode {
-                        GraphViewMode::LinkGraph => {
-                            ui.label("Links to this file:");
-                            for edge in graph_to_display_details
-                                .edges_directed(node, petgraph::Direction::Incoming)
-                            {
-                                ui.label(format!("← {}", graph_to_display_details[edge.source()]));
-                            }
-
-                            ui.label("Links from this file:");
-                            for edge in graph_to_display_details
-                                .edges_directed(node, petgraph::Direction::Outgoing)
-                            {
-                                ui.label(format!("→ {}", graph_to_display_details[edge.target()]));
-                            }
-                        }
-                        GraphViewMode::TagGraph => {
-                            ui.label("Files sharing tags with this file:");
-                            for edge in graph_to_display_details
-                                .edges_directed(node, petgraph::Direction::Incoming)
-                            {
-                                ui.label(format!("↔ {}", graph_to_display_details[edge.source()]));
-                            }
-                            for edge in graph_to_display_details
-                                .edges_directed(node, petgraph::Direction::Outgoing)
-                            {
-                                if edge.source() != node {
-                                    ui.label(format!(
-                                        "↔ {}",
-                                        graph_to_display_details[edge.target()]
-                                    ));
-                                }
-                            }
-                        }
-                    }
+                if ui
+                    .radio_value(&mut self.current_graph_mode, GraphMode::Tags, "Tags")
+                    .clicked()
+                {
+                    self.selected_node = None;
+                    self.physics_simulator
+                        .reset_positions(&self.initial_node_layout);
                 }
-            }
-        });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.show_graph_view {
-                let mut changed_mode = false;
-
-                ui.horizontal(|ui| {
-                    ui.add_space(20.0);
-                    ui.label("Graph Type:");
-
-                    if ui
-                        .radio_value(
-                            &mut self.current_graph_mode,
-                            GraphViewMode::LinkGraph,
-                            "Links",
-                        )
-                        .clicked()
-                    {
-                        changed_mode = true;
-                    }
-                    if ui
-                        .radio_value(
-                            &mut self.current_graph_mode,
-                            GraphViewMode::TagGraph,
-                            "Tags",
-                        )
-                        .clicked()
-                    {
-                        changed_mode = true;
-                    }
-
-                    ui.add_space(20.0);
-                    if ui
-                        .button(if self.show_full_path {
-                            "Show Filenames Only"
-                        } else {
-                            "Show Absolute Paths"
-                        })
-                        .clicked()
-                    {
-                        self.show_full_path = !self.show_full_path;
-                    }
-                });
+                ui.checkbox(&mut self.show_full_paths, "Show Full Paths");
 
                 ui.separator();
 
-                let graph_rect = ui.available_rect_before_wrap();
+                ui.label("Filter Tags:");
+                ui.text_edit_singleline(&mut self.tag_filter_input);
 
-                if changed_mode || self.physics_simulator.node_positions.is_empty() {
-                    let layout_rect = self.calculate_initial_node_positions();
+                if ui.button("Rescan Directory").clicked() && !self.is_scanning {
+                    self.is_scanning = true;
+                    self.scan_error = None;
+                    self.selected_node = None;
+                    self.selected_file_content = None;
+                    self.selected_image = None;
 
-                    if layout_rect == egui::Rect::NOTHING {
-                        self.pan_offset = egui::Vec2::ZERO;
-                        self.zoom_factor = 1.0;
-                    } else {
-                        let target_center = graph_rect.center();
-                        let layout_center = layout_rect.center();
-                        self.pan_offset = target_center.to_vec2() - layout_center.to_vec2();
-                        self.zoom_factor = 1.0;
-                    }
+                    let scanner_arc_clone = self.scanner.clone();
+                    let scan_dir_clone = self.scan_dir.clone();
+                    thread::spawn(move || {
+                        let mut scanner = scanner_arc_clone.lock().unwrap();
+                        if let Err(e) = scanner.scan_directory(&scan_dir_clone) {
+                            eprintln!("Error during scan: {}", e);
+                        }
+                    });
                 }
 
-                let graph_response = ui.allocate_rect(graph_rect, egui::Sense::drag());
-
-                // Handle panning only when not dragging a node
-                if graph_response.dragged() && self.dragged_node.is_none() {
-                    self.pan_offset += graph_response.drag_delta();
+                if self.is_scanning {
+                    ui.label("Scanning...");
                 }
 
-                let zoom_delta = ctx.input(|i| i.zoom_delta());
-                if zoom_delta != 1.0 && graph_response.hovered() {
-                    let old_zoom = self.zoom_factor;
-                    self.zoom_factor *= zoom_delta;
-                    self.zoom_factor = self.zoom_factor.clamp(0.1, 5.0);
-
-                    if let Some(mouse_screen_pos) = ctx.pointer_hover_pos() {
-                        let mouse_relative_to_graph_rect =
-                            mouse_screen_pos - graph_rect.min.to_vec2();
-                        let mouse_in_graph_space_old =
-                            (mouse_relative_to_graph_rect - self.pan_offset) / old_zoom;
-                        let mouse_in_graph_space_new =
-                            (mouse_relative_to_graph_rect - self.pan_offset) / self.zoom_factor;
-                        self.pan_offset += (mouse_in_graph_space_new - mouse_in_graph_space_old)
-                            * self.zoom_factor;
-                    }
+                if let Some(ref err) = self.scan_error {
+                    ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
                 }
 
-                // Update physics (skip if we're dragging a node)
-                if self.dragged_node.is_none() {
-                    self.update_graph_physics();
+                // Corrected exit button with proper parentheses
+                if ui
+                    .add(egui::Button::new("✕ Exit").fill(Color32::from_rgb(200, 80, 80)))
+                    .clicked()
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
+            });
 
-                let painter = ui.painter();
-                let current_graph = match self.current_graph_mode {
-                    GraphViewMode::LinkGraph => &self.graph.graph,
-                    GraphViewMode::TagGraph => &self.tag_graph.graph,
-                };
-
-                let transform_pos = |p: egui::Pos2| {
-                    (p.to_vec2() * self.zoom_factor + self.pan_offset + graph_rect.min.to_vec2())
-                        .to_pos2()
-                };
-
-                // Draw edges first
-                for edge in current_graph.raw_edges() {
-                    if let (Some(&start_pos), Some(&end_pos)) = (
-                        self.physics_simulator.node_positions.get(&edge.source()),
-                        self.physics_simulator.node_positions.get(&edge.target()),
-                    ) {
-                        painter.line_segment(
-                            [transform_pos(start_pos), transform_pos(end_pos)],
-                            egui::Stroke::new(1.0, egui::Color32::GRAY),
-                        );
-                    }
-                }
-
-                // Draw nodes and labels
-                let node_radius = 20.0 * self.zoom_factor;
-                for node_idx in current_graph.node_indices() {
-                    if let Some(&center_pos) = self.physics_simulator.node_positions.get(&node_idx)
-                    {
-                        let actual_center_pos = transform_pos(center_pos);
-                        let node_name = &current_graph[node_idx];
-                        let display_name = self.get_display_name(node_name);
-
-                        // Draw node
-                        let node_color = if self.selected_node == Some(node_idx.index()) {
-                            egui::Color32::LIGHT_BLUE
-                        } else {
-                            egui::Color32::BLUE
-                        };
-                        painter.circle_filled(actual_center_pos, node_radius, node_color);
-
-                        // Draw label
-                        let font_size = 10.0 * self.zoom_factor;
-                        let font_id = egui::FontId::proportional(font_size);
-                        let galley = painter.layout_no_wrap(
-                            display_name.clone(),
-                            font_id,
-                            egui::Color32::WHITE,
-                        );
-
-                        let text_pos = if self.show_full_path {
-                            actual_center_pos + egui::vec2(0.0, node_radius + 2.0)
-                        } else {
-                            actual_center_pos
-                        };
-
-                        if self.show_full_path {
-                            painter.rect_filled(
-                                egui::Rect::from_center_size(
-                                    text_pos + galley.size() * 0.5,
-                                    galley.size() + egui::vec2(4.0, 2.0),
-                                ),
-                                2.0,
-                                egui::Color32::from_black_alpha(100),
+            // Physics controls section at bottom
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.group(|ui| {
+                    ui.label("Physics Controls:");
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.physics_simulator.spring_constant,
+                                    0.001..=0.5,
+                                )
+                                .text("Spring K"),
                             );
-                        }
-                        painter.galley(text_pos, galley.clone(), egui::Color32::WHITE);
+                            ui.add(
+                                egui::Slider::new(&mut self.physics_simulator.damping, 0.0..=0.9)
+                                    .text("Damping"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.physics_simulator.time_step, 0.1..=1.0)
+                                    .text("Time Step"),
+                            );
+                        });
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.physics_simulator.repulsion_constant,
+                                    100.0..=50000.0,
+                                )
+                                .text("Repulsion K"),
+                            );
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.physics_simulator.ideal_edge_length,
+                                    10.0..=300.0,
+                                )
+                                .text("Ideal Length"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.physics_simulator.friction, 0.0..=0.9)
+                                    .text("Friction"),
+                            );
+                        });
+                    });
+                    if ui.button("Reset Node Positions").clicked() {
+                        self.physics_simulator
+                            .reset_positions(&self.initial_node_layout);
+                    }
+                });
+            });
+        });
 
-                        // Handle interaction
-                        let node_rect = if self.show_full_path {
-                            egui::Rect::from_center_size(
-                                actual_center_pos,
-                                egui::vec2(
-                                    galley.size().x.max(node_radius * 2.0),
-                                    node_radius * 2.0 + galley.size().y,
-                                ),
-                            )
-                        } else {
-                            egui::Rect::from_center_size(
-                                actual_center_pos,
-                                egui::vec2(node_radius * 2.0, node_radius * 2.0),
-                            )
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let (response, painter) = ui.allocate_painter(
+                ui.available_size(),
+                egui::Sense::hover() | egui::Sense::drag() | egui::Sense::click(),
+            );
+
+            let graph_rect = response.rect;
+            let to_screen = egui::emath::RectTransform::from_to(
+                egui::Rect::from_center_size(egui::Pos2::ZERO, graph_rect.size()),
+                graph_rect,
+            );
+
+            if response.hovered() {
+                self.graph_zoom_factor *= ctx.input(|i| i.zoom_delta());
+                self.graph_zoom_factor = self.graph_zoom_factor.clamp(0.1, 10.0);
+            }
+
+            if response.dragged_by(egui::PointerButton::Middle) {
+                self.graph_center_offset += response.drag_delta() / self.graph_zoom_factor;
+            }
+
+            let mut scanner_locked = self.scanner.lock().unwrap();
+            self.file_graph.build_from_scanner(&scanner_locked);
+            self.tag_graph.build_from_tags(&scanner_locked);
+
+            let (nodes_to_draw, edges_to_draw) = match self.current_graph_mode {
+                GraphMode::Links => {
+                    let nodes: Vec<_> = self.file_graph.node_indices.values().cloned().collect();
+                    let edges: Vec<_> = self
+                        .file_graph
+                        .graph
+                        .edge_references()
+                        .map(|e| (e.source(), e.target()))
+                        .collect();
+                    (nodes, edges)
+                }
+                GraphMode::Tags => {
+                    let filtered_tag_nodes: HashMap<_, _> = self
+                        .tag_graph
+                        .tag_node_indices
+                        .iter()
+                        .filter(|(tag_name, _)| {
+                            self.tag_filter_input.is_empty()
+                                || tag_name.contains(&self.tag_filter_input)
+                        })
+                        .map(|(tag_name, &node_idx)| (tag_name.clone(), node_idx))
+                        .collect();
+
+                    let mut nodes = Vec::new();
+                    let mut edges = Vec::new();
+
+                    for (file_path, &file_node_idx) in &self.tag_graph.file_node_indices {
+                        if let Some(tags_for_file) = scanner_locked.tags.get(file_path) {
+                            if tags_for_file
+                                .iter()
+                                .any(|tag| filtered_tag_nodes.contains_key(tag))
+                            {
+                                nodes.push(file_node_idx);
+                            }
+                        }
+                    }
+
+                    for (tag_name, &tag_node_idx) in &filtered_tag_nodes {
+                        nodes.push(tag_node_idx);
+                        for edge_ref in self.tag_graph.graph.edges(tag_node_idx) {
+                            edges.push((edge_ref.source(), edge_ref.target()));
+                        }
+                    }
+                    (nodes, edges)
+                }
+            };
+
+            for node_idx in &nodes_to_draw {
+                if !self.physics_simulator.node_positions.contains_key(node_idx) {
+                    let mut rng = rand::thread_rng();
+                    let random_pos =
+                        egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                    self.physics_simulator
+                        .node_positions
+                        .insert(*node_idx, random_pos);
+                    self.physics_simulator
+                        .node_velocities
+                        .insert(*node_idx, egui::Vec2::ZERO);
+                    self.initial_node_layout.insert(*node_idx, random_pos);
+                }
+            }
+
+            self.physics_simulator
+                .node_positions
+                .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+            self.physics_simulator
+                .node_velocities
+                .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+            self.initial_node_layout
+                .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+
+            if self.dragged_node.is_none() {
+                self.physics_simulator.update(&edges_to_draw);
+            }
+
+            for (start_node_idx, end_node_idx) in &edges_to_draw {
+                if let (Some(&start_pos), Some(&end_pos)) = (
+                    self.physics_simulator.get_node_position(*start_node_idx),
+                    self.physics_simulator.get_node_position(*end_node_idx),
+                ) {
+                    let start_screen_pos = to_screen.transform_pos(pos2(
+                        start_pos.x * self.graph_zoom_factor + self.graph_center_offset.x,
+                        start_pos.y * self.graph_zoom_factor + self.graph_center_offset.y,
+                    ));
+                    let end_screen_pos = to_screen.transform_pos(pos2(
+                        end_pos.x * self.graph_zoom_factor + self.graph_center_offset.x,
+                        end_pos.y * self.graph_zoom_factor + self.graph_center_offset.y,
+                    ));
+
+                    let stroke = Stroke::new(1.0, Color32::GRAY);
+                    painter.line_segment([start_screen_pos, end_screen_pos], stroke);
+
+                    let vec_between = end_screen_pos - start_screen_pos;
+                    let end_point_for_arrow = start_screen_pos + vec_between * 0.9;
+
+                    let dir = vec_between.normalized();
+                    let arrow_size = 8.0;
+
+                    let arrow_tip1 = end_point_for_arrow - rotate_vec2(dir, 0.5) * arrow_size;
+                    let arrow_tip2 = end_point_for_arrow - rotate_vec2(dir, -0.5) * arrow_size;
+
+                    painter.line_segment([end_point_for_arrow, arrow_tip1], stroke);
+                    painter.line_segment([end_point_for_arrow, arrow_tip2], stroke);
+                }
+            }
+
+            for &node_idx in &nodes_to_draw {
+                if let Some(node_pos_vec2) =
+                    self.physics_simulator.get_node_position(node_idx).cloned()
+                {
+                    let screen_pos = to_screen.transform_pos(pos2(
+                        node_pos_vec2.x * self.graph_zoom_factor + self.graph_center_offset.x,
+                        node_pos_vec2.y * self.graph_zoom_factor + self.graph_center_offset.y,
+                    ));
+
+                    let node_name = match self.current_graph_mode {
+                        GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                            GraphNode::File(s) => s.clone(),
+                            GraphNode::Tag(s) => s.clone(),
+                        },
+                        GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                            GraphNode::File(s) => s.clone(),
+                            GraphNode::Tag(s) => s.clone(),
+                        },
+                    };
+
+                    let node_radius = 15.0 * self.graph_zoom_factor;
+                    let node_color = if Some(node_idx) == self.selected_node {
+                        Color32::from_rgb(255, 100, 100)
+                    } else {
+                        match self.current_graph_mode {
+                            GraphMode::Links => Color32::BLUE,
+                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                GraphNode::File(_) => Color32::BLUE,
+                                GraphNode::Tag(_) => Color32::GREEN,
+                            },
+                        }
+                    };
+
+                    painter.circle_filled(screen_pos, node_radius, node_color);
+
+                    let display_name = if self.show_full_paths {
+                        node_name.clone()
+                    } else {
+                        PathBuf::from(&node_name).file_name().map_or_else(
+                            || node_name.clone(),
+                            |os_str| os_str.to_string_lossy().into_owned(),
+                        )
+                    };
+
+                    let font_id = egui::TextStyle::Body.resolve(ui.style());
+                    let text_galley =
+                        ui.fonts(|f| f.layout_no_wrap(display_name, font_id, Color32::WHITE));
+
+                    let text_pos =
+                        screen_pos + vec2(-text_galley.size().x / 2.0, node_radius + 5.0);
+                    painter.galley(text_pos, text_galley.clone(), Color32::WHITE);
+
+                    let node_rect = if text_galley.size().y > 0.0 {
+                        egui::Rect::from_center_size(
+                            screen_pos,
+                            egui::vec2(node_radius * 2.0, node_radius * 2.0 + text_galley.size().y),
+                        )
+                    } else {
+                        egui::Rect::from_center_size(
+                            screen_pos,
+                            egui::vec2(node_radius * 2.0, node_radius * 2.0),
+                        )
+                    };
+
+                    let node_response =
+                        ui.interact(node_rect, ui.id().with(node_idx), Sense::click_and_drag());
+
+                    if node_response.dragged_by(egui::PointerButton::Primary) {
+                        let delta = node_response.drag_delta() / self.graph_zoom_factor;
+                        self.physics_simulator
+                            .set_node_position(node_idx, node_pos_vec2 + delta);
+                        self.dragged_node = Some(node_idx);
+                        self.last_drag_pos = Some(node_response.rect.center());
+                    } else if node_response.drag_stopped() {
+                        self.dragged_node = None;
+                        self.last_drag_pos = None;
+                    }
+
+                    if node_response.clicked() {
+                        self.selected_node = Some(node_idx);
+                        self.selected_image = None;
+                        self.selected_file_content = None;
+
+                        let path_buf = match self.current_graph_mode {
+                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                GraphNode::File(s) => PathBuf::from(s),
+                                GraphNode::Tag(_) => PathBuf::new(),
+                            },
+                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                GraphNode::File(s) => PathBuf::from(s),
+                                GraphNode::Tag(_) => PathBuf::new(),
+                            },
                         };
 
-                        let node_response = ui.interact(
-                            node_rect,
-                            ui.id().with(node_idx.index()),
-                            egui::Sense::click_and_drag(),
-                        );
-
-                        if node_response.dragged() {
-                            if let Some(last_pos) = self.last_drag_pos {
-                                let delta = node_response.drag_delta() / self.zoom_factor;
-                                if let Some(pos) =
-                                    self.physics_simulator.node_positions.get_mut(&node_idx)
-                                {
-                                    *pos += delta;
-                                    self.physics_simulator
-                                        .node_velocities
-                                        .insert(node_idx, egui::Vec2::ZERO);
+                        if path_buf.exists() && path_buf.is_file() {
+                            if let Some(ext) = path_buf.extension().and_then(|e| e.to_str()) {
+                                let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+                                if image_extensions.contains(&ext.to_lowercase().as_str()) {
+                                    match image::open(&path_buf) {
+                                        Ok(img) => {
+                                            let size = [img.width() as _, img.height() as _];
+                                            let image_buffer = img.to_rgba8();
+                                            let pixels = image_buffer.as_flat_samples();
+                                            let color_image =
+                                                egui::ColorImage::from_rgba_unmultiplied(
+                                                    size,
+                                                    pixels.as_slice(),
+                                                );
+                                            self.selected_image = Some(ctx.load_texture(
+                                                path_buf.to_string_lossy(),
+                                                color_image,
+                                                egui::TextureOptions::LINEAR,
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Error loading image: {}", e);
+                                            self.selected_image = None;
+                                        }
+                                    }
+                                } else {
+                                    self.selected_file_content =
+                                        std::fs::read_to_string(&path_buf).ok();
                                 }
+                            } else {
+                                self.selected_file_content =
+                                    std::fs::read_to_string(&path_buf).ok();
                             }
-                            self.dragged_node = Some(node_idx);
-                            self.last_drag_pos = Some(node_response.rect.center());
-                        } else if node_response.drag_released() {
-                            self.dragged_node = None;
-                            self.last_drag_pos = None;
                         }
+                    }
 
-                        if node_response.clicked() {
-                            self.selected_node = Some(node_idx.index());
-                            self.selected_image = None;
-                            let path_buf = PathBuf::from(node_name);
-                            self.selected_file_content = std::fs::read_to_string(&path_buf).ok();
-                        }
+                    if node_response.hovered() {
+                        egui::show_tooltip_at_pointer(
+                            ctx,
+                            egui::LayerId::background(),
+                            egui::Id::new("node_tooltip"),
+                            |ui| {
+                                let full_name = match self.current_graph_mode {
+                                    GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                        GraphNode::File(file_path_str) => file_path_str.clone(),
+                                        GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
+                                    },
+                                    GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                        GraphNode::File(file_path_str) => file_path_str.clone(),
+                                        GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
+                                    },
+                                };
+                                ui.label(full_name);
+                            },
+                        );
                     }
                 }
             }
         });
 
-        if self.should_exit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        egui::SidePanel::right("right_panel").show(ctx, |ui| {
+            ui.heading("Content Preview");
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Some(content) = &mut self.selected_file_content {
+                    let mut text = content.clone();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text).desired_width(ui.available_width()),
+                    );
+                    if text != *content {
+                        *content = text;
+                    }
+                } else if let Some(texture) = &self.selected_image {
+                    // Improved image preview
+                    ui.vertical_centered(|ui| {
+                        let available_width = ui.available_width() - 20.0; // Add some padding
+                        let img_size = texture.size_vec2();
+                        let ratio = img_size.y / img_size.x;
+                        let desired_height = available_width * ratio;
+
+                        // Show image dimensions
+                        ui.label(format!(
+                            "Image: {}×{}",
+                            img_size.x as i32, img_size.y as i32
+                        ));
+
+                        // Display the image with maximum width while maintaining aspect ratio
+                        ui.image(texture);
+                    });
+                } else {
+                    ui.label("Select a file or image to preview its content.");
+                }
+            });
+        });
+
+        ctx.request_repaint();
+    }
+}
+
+impl FileGraphApp {
+    pub fn new(scan_dir: PathBuf) -> Self {
+        // Ensure we're only scanning dummy_dir
+        let current_dir = scan_dir.join("dummy_dir");
+        if !current_dir.exists() {
+            std::fs::create_dir_all(&current_dir).expect("Failed to create dummy_dir");
+        }
+
+        let current_directory_label = format!("{}", current_dir.display());
+
+        let mut scanner = FileScanner::new(&current_dir);
+        if let Err(e) = scanner.scan_directory(&current_dir) {
+            eprintln!("Initial scan error: {}", e);
+        }
+
+        let mut graph = FileGraph::new();
+        graph.build_from_scanner(&scanner);
+
+        let mut tag_graph = TagGraph::new();
+        tag_graph.build_from_tags(&scanner);
+
+        let mut physics_simulator = PhysicsSimulator::new();
+        let mut initial_node_layout = HashMap::new();
+        let mut rng = rand::thread_rng();
+
+        for &node_idx in graph.node_indices.values() {
+            let random_pos = egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+            physics_simulator
+                .node_positions
+                .insert(node_idx, random_pos);
+            initial_node_layout.insert(node_idx, random_pos);
+        }
+
+        for &node_idx in tag_graph.file_node_indices.values() {
+            if !physics_simulator.node_positions.contains_key(&node_idx) {
+                let random_pos =
+                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                physics_simulator
+                    .node_positions
+                    .insert(node_idx, random_pos);
+                initial_node_layout.insert(node_idx, random_pos);
+            }
+        }
+
+        for &node_idx in tag_graph.tag_node_indices.values() {
+            if !physics_simulator.node_positions.contains_key(&node_idx) {
+                let random_pos =
+                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                physics_simulator
+                    .node_positions
+                    .insert(node_idx, random_pos);
+                initial_node_layout.insert(node_idx, random_pos);
+            }
+        }
+
+        physics_simulator.initialize_velocities();
+
+        Self {
+            scan_dir: current_dir,
+            scanner: Arc::new(Mutex::new(scanner)),
+            file_graph: graph,
+            tag_graph,
+            current_graph_mode: GraphMode::Links,
+            selected_node: None,
+            selected_image: None,
+            selected_file_content: None,
+            tag_filter_input: String::new(),
+            physics_simulator,
+            initial_node_layout,
+            graph_center_offset: egui::Vec2::ZERO,
+            graph_zoom_factor: 1.0,
+            show_full_paths: false,
+            is_scanning: false,
+            scan_error: None,
+            dragged_node: None,
+            last_drag_pos: None,
+            current_directory_label, // Added
         }
     }
+}
+
+fn rotate_vec2(vec: egui::Vec2, angle: f32) -> egui::Vec2 {
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+    egui::vec2(vec.x * cos_a - vec.y * sin_a, vec.x * sin_a + vec.y * cos_a)
 }

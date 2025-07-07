@@ -1,16 +1,24 @@
+// src/graph.rs
 use crate::file_scan;
 use petgraph::{Graph, graph::NodeIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GraphNode {
+    File(String),
+    Tag(String),
+}
+
 pub struct FileGraph {
-    pub graph: Graph<String, ()>,
+    pub graph: Graph<GraphNode, ()>,
     pub node_indices: HashMap<PathBuf, NodeIndex>,
 }
 
 pub struct TagGraph {
-    pub graph: Graph<String, ()>,
-    pub node_indices: HashMap<PathBuf, NodeIndex>,
+    pub graph: Graph<GraphNode, ()>,
+    pub file_node_indices: HashMap<PathBuf, NodeIndex>,
+    pub tag_node_indices: HashMap<String, NodeIndex>,
 }
 
 impl FileGraph {
@@ -22,8 +30,12 @@ impl FileGraph {
     }
 
     pub fn build_from_scanner(&mut self, scanner: &file_scan::FileScanner) {
+        self.graph.clear();
+        self.node_indices.clear();
+
         for (path, _) in &scanner.files {
-            let node_idx = self.graph.add_node(path.display().to_string());
+            let node_data = GraphNode::File(path.display().to_string());
+            let node_idx = self.graph.add_node(node_data);
             self.node_indices.insert(path.clone(), node_idx);
         }
 
@@ -47,40 +59,43 @@ impl TagGraph {
     pub fn new() -> Self {
         Self {
             graph: Graph::new(),
-            node_indices: HashMap::new(),
+            file_node_indices: HashMap::new(),
+            tag_node_indices: HashMap::new(),
         }
     }
 
     pub fn build_from_tags(&mut self, scanner: &file_scan::FileScanner) {
-        // Add all files with tags as nodes
-        for (path, _) in &scanner.files {
-            if scanner.tags.contains_key(path) {
-                // Only add files that have tags
-                let node_idx = self.graph.add_node(path.display().to_string());
-                self.node_indices.insert(path.clone(), node_idx);
+        self.graph.clear();
+        self.file_node_indices.clear();
+        self.tag_node_indices.clear();
+
+        for (file_path, tags) in &scanner.tags {
+            if !tags.is_empty() {
+                let node_data = GraphNode::File(file_path.display().to_string());
+                let node_idx = self.graph.add_node(node_data);
+                self.file_node_indices.insert(file_path.clone(), node_idx);
             }
         }
 
-        // Connect files that share tags
-        let file_paths: Vec<PathBuf> = self.node_indices.keys().cloned().collect();
-        for i in 0..file_paths.len() {
-            for j in (i + 1)..file_paths.len() {
-                let path1 = &file_paths[i];
-                let path2 = &file_paths[j];
-
-                if let (Some(tags1), Some(tags2)) =
-                    (scanner.tags.get(path1), scanner.tags.get(path2))
-                {
-                    // Check for common tags
-                    if tags1.iter().any(|tag1| tags2.contains(tag1)) {
-                        if let (Some(&idx1), Some(&idx2)) =
-                            (self.node_indices.get(path1), self.node_indices.get(path2))
-                        {
-                            self.graph.add_edge(idx1, idx2, ());
-                        }
-                    }
+        for (file_path, tags) in &scanner.tags {
+            if let Some(&file_node_idx) = self.file_node_indices.get(file_path) {
+                for tag in tags {
+                    let tag_node_idx =
+                        *self.tag_node_indices.entry(tag.clone()).or_insert_with(|| {
+                            let node_data = GraphNode::Tag(tag.clone());
+                            self.graph.add_node(node_data)
+                        });
+                    self.graph.add_edge(tag_node_idx, file_node_idx, ());
                 }
             }
         }
+    }
+
+    pub fn file_node_indices(&self) -> &HashMap<PathBuf, NodeIndex> {
+        &self.file_node_indices
+    }
+
+    pub fn tag_node_indices(&self) -> &HashMap<String, NodeIndex> {
+        &self.tag_node_indices
     }
 }

@@ -1,16 +1,32 @@
+// src/physics_nodes.rs
 use egui::{Pos2, Vec2};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhysicsNode {
+    pub pos: egui::Vec2,
+    pub vel: egui::Vec2,
+}
+
+impl PhysicsNode {
+    pub fn new(pos: egui::Vec2) -> Self {
+        Self {
+            pos,
+            vel: egui::Vec2::ZERO,
+        }
+    }
+}
+
 pub struct PhysicsSimulator {
-    pub node_positions: HashMap<NodeIndex, Pos2>,
-    pub node_velocities: HashMap<NodeIndex, Vec2>,
-    pub node_forces: HashMap<NodeIndex, Vec2>,
-    pub damping: f32,            // Friction coefficient (0.0-1.0)
-    pub spring_constant: f32,    // Controls edge stiffness
-    pub repulsion_constant: f32, // Controls node repulsion
-    pub ideal_edge_length: f32,  // Target length for edges
-    pub time_step: f32,          // Simulation time step
+    pub node_positions: HashMap<NodeIndex, egui::Vec2>,
+    pub node_velocities: HashMap<NodeIndex, egui::Vec2>,
+    pub damping: f32,
+    pub spring_constant: f32,
+    pub repulsion_constant: f32,
+    pub ideal_edge_length: f32,
+    pub time_step: f32,
+    pub friction: f32,
 }
 
 impl PhysicsSimulator {
@@ -18,12 +34,12 @@ impl PhysicsSimulator {
         Self {
             node_positions: HashMap::new(),
             node_velocities: HashMap::new(),
-            node_forces: HashMap::new(),
-            damping: 0.3,
-            spring_constant: 0.1,
-            repulsion_constant: 1000.0,
+            damping: 0.8,
+            spring_constant: 0.01,
+            repulsion_constant: 10000.0,
             ideal_edge_length: 100.0,
-            time_step: 0.5, // Slower simulation for stability
+            time_step: 0.5,
+            friction: 0.1,
         }
     }
 
@@ -34,97 +50,89 @@ impl PhysicsSimulator {
     }
 
     pub fn update(&mut self, edges: &[(NodeIndex, NodeIndex)]) {
-        self.clear_forces();
-        self.calculate_spring_forces(edges);
-        self.calculate_repulsion_forces();
-        self.update_positions();
-    }
+        let mut node_forces: HashMap<NodeIndex, Vec2> = HashMap::new();
 
-    fn clear_forces(&mut self) {
+        // Initialize forces to zero
         for node in self.node_positions.keys() {
-            self.node_forces.insert(*node, Vec2::ZERO);
+            node_forces.insert(*node, Vec2::ZERO);
         }
-    }
 
-    fn calculate_spring_forces(&mut self, edges: &[(NodeIndex, NodeIndex)]) {
-        for &(source, target) in edges {
-            if let (Some(&start_pos), Some(&end_pos)) = (
-                self.node_positions.get(&source),
-                self.node_positions.get(&target),
+        // Calculate spring forces
+        for (node1, node2) in edges {
+            if let (Some(&pos1), Some(&pos2)) = (
+                self.node_positions.get(node1),
+                self.node_positions.get(node2),
             ) {
-                let delta = end_pos.to_vec2() - start_pos.to_vec2();
-                let distance = delta.length();
-                let direction = delta.normalized();
+                let delta = Vec2::new(pos2.x - pos1.x, pos2.y - pos1.y);
+                let distance = delta.length().max(0.1);
+                let displacement = distance - self.ideal_edge_length;
 
-                // Hooke's law: F = -kx
-                let spring_force =
-                    direction * (distance - self.ideal_edge_length) * self.spring_constant;
+                let force_magnitude = self.spring_constant * displacement;
+                let spring_force = (delta / distance) * force_magnitude;
 
-                *self.node_forces.entry(source).or_default() += spring_force;
-                *self.node_forces.entry(target).or_default() -= spring_force;
+                *node_forces.entry(*node1).or_default() += spring_force;
+                *node_forces.entry(*node2).or_default() -= spring_force;
             }
         }
-    }
 
-    fn calculate_repulsion_forces(&mut self) {
-        let nodes: Vec<NodeIndex> = self.node_positions.keys().cloned().collect();
-
-        for i in 0..nodes.len() {
-            for j in i + 1..nodes.len() {
-                let node1 = nodes[i];
-                let node2 = nodes[j];
+        // Calculate repulsion forces
+        let node_indices: Vec<NodeIndex> = self.node_positions.keys().cloned().collect();
+        for i in 0..node_indices.len() {
+            for j in (i + 1)..node_indices.len() {
+                let node1 = node_indices[i];
+                let node2 = node_indices[j];
 
                 if let (Some(&pos1), Some(&pos2)) = (
                     self.node_positions.get(&node1),
                     self.node_positions.get(&node2),
                 ) {
-                    let delta = pos2.to_vec2() - pos1.to_vec2();
+                    let delta = Vec2::new(pos2.x - pos1.x, pos2.y - pos1.y);
                     let distance_sq = delta.length_sq();
-                    let min_distance = 10.0; // Minimum distance to prevent extreme forces
-                    let effective_distance_sq = distance_sq.max(min_distance * min_distance);
+                    let distance = distance_sq.sqrt().max(0.1);
 
-                    // Coulomb's law: F = k / r²
-                    let repulsion_force = (delta / effective_distance_sq.sqrt())
-                        * (self.repulsion_constant / effective_distance_sq);
+                    let repulsion_force =
+                        (delta / distance) * (self.repulsion_constant / distance_sq.max(10.0));
 
-                    *self.node_forces.entry(node1).or_default() -= repulsion_force;
-                    *self.node_forces.entry(node2).or_default() += repulsion_force;
+                    *node_forces.entry(node1).or_default() -= repulsion_force;
+                    *node_forces.entry(node2).or_default() += repulsion_force;
                 }
             }
         }
-    }
 
-    fn update_positions(&mut self) {
-        // Collect nodes first to avoid borrowing issues
-        let nodes: Vec<NodeIndex> = self.node_positions.keys().cloned().collect();
-
-        for node in nodes {
-            if let (Some(force), Some(velocity), Some(position)) = (
-                self.node_forces.get_mut(&node),
-                self.node_velocities.get_mut(&node),
-                self.node_positions.get_mut(&node),
+        // Update velocities and positions
+        for (node_idx, force) in node_forces {
+            if let (Some(pos), Some(vel)) = (
+                self.node_positions.get_mut(&node_idx),
+                self.node_velocities.get_mut(&node_idx),
             ) {
-                // Apply force to velocity (F = ma, assuming m=1)
-                *velocity += *force * self.time_step;
-
-                // Apply damping (friction)
-                *velocity *= 1.0 - (self.damping * self.time_step);
-
-                // Update position
-                *position = Pos2::new(
-                    position.x + velocity.x * self.time_step,
-                    position.y + velocity.y * self.time_step,
-                );
-
-                // Stop very small movements
-                if velocity.length() < 0.1 {
-                    *velocity = Vec2::ZERO;
-                }
+                *vel += force * self.time_step;
+                *vel *= self.damping;
+                *vel *= 1.0 - self.friction;
+                *pos += *vel * self.time_step;
             }
         }
     }
 
-    // Helper methods for parameter adjustment
+    pub fn get_node_position(&self, index: NodeIndex) -> Option<&egui::Vec2> {
+        self.node_positions.get(&index)
+    }
+
+    pub fn set_node_position(&mut self, index: NodeIndex, new_pos: egui::Vec2) {
+        if let Some(pos) = self.node_positions.get_mut(&index) {
+            *pos = new_pos;
+            self.node_velocities.insert(index, egui::Vec2::ZERO);
+        }
+    }
+
+    pub fn set_node_velocity(&mut self, index: NodeIndex, new_vel: egui::Vec2) {
+        self.node_velocities.insert(index, new_vel);
+    }
+
+    pub fn reset_positions(&mut self, initial_layout: &HashMap<NodeIndex, egui::Vec2>) {
+        self.node_positions = initial_layout.clone();
+        self.initialize_velocities();
+    }
+
     pub fn set_damping(&mut self, damping: f32) {
         self.damping = damping.clamp(0.0, 1.0);
     }
@@ -138,10 +146,10 @@ impl PhysicsSimulator {
     }
 
     pub fn set_ideal_edge_length(&mut self, length: f32) {
-        self.ideal_edge_length = length.max(1.0);
+        self.ideal_edge_length = length.max(0.0);
     }
 
     pub fn set_time_step(&mut self, time_step: f32) {
-        self.time_step = time_step.max(0.01).min(1.0);
+        self.time_step = time_step.max(0.0);
     }
 }

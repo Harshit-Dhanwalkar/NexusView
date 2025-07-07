@@ -1,21 +1,33 @@
+// src/main.rs
+use eframe::{NativeOptions, egui};
+use std::path::PathBuf;
+
 mod file_scan;
 mod graph;
 mod physics_nodes;
 mod ui;
 
-use eframe::egui;
+fn main() -> Result<(), eframe::Error> {
+    let args: Vec<String> = std::env::args().collect();
+    let scan_dir = if args.len() > 1 {
+        PathBuf::from(&args[1])
+    } else {
+        eprintln!("Usage: {} <path_to_directory_to_scan>", args[0]);
+        eprintln!("Scanning current directory as no path was provided.");
+        std::env::current_dir().expect("Failed to get current directory")
+    };
 
-fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
+    let app_name = "NexusView";
+    let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_title("Interactive File Graph"),
+            .with_inner_size(egui::vec2(1200.0, 800.0))
+            .with_title(app_name),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Interactive File Graph",
+        app_name,
         options,
-        Box::new(|cc| Ok(Box::new(ui::FileGraphApp::new(cc, "./dummy_dir")))),
+        Box::new(|_cc| Ok(Box::new(ui::FileGraphApp::new(scan_dir)))),
     )
 }

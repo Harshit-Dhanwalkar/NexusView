@@ -1,7 +1,8 @@
+// src/file_scan.rs
 use regex::Regex;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 pub struct FileScanner {
     root_path: PathBuf,
@@ -20,50 +21,74 @@ impl FileScanner {
         }
     }
 
-    pub fn scan(&mut self) {
+    pub fn scan_directory(&mut self, path: &Path) -> Result<(), String> {
+        if !path.is_dir() {
+            return Err(format!("Path is not a directory: {:?}", path));
+        }
+
+        self.files.clear();
+        self.tags.clear();
+        self.images.clear();
+
+        self.traverse_directory(path)?;
+
+        let mut resolved_files = HashMap::new();
+        for (file_path, links) in &self.files {
+            let mut resolved_links_for_file = Vec::new();
+            for link in links {
+                let resolved_link = if link.is_relative() {
+                    self.root_path.join(link)
+                } else {
+                    link.clone()
+                };
+                resolved_links_for_file.push(resolved_link);
+            }
+            resolved_files.insert(file_path.clone(), resolved_links_for_file);
+        }
+        self.files = resolved_files;
+
+        Ok(())
+    }
+
+    fn traverse_directory(&mut self, path: &Path) -> Result<(), String> {
         let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
-        let tag_re = Regex::new(r"#(\w+)").unwrap(); // Regex to find tags
+        let tag_re = Regex::new(r"#(\w+)").unwrap();
+        let link_re = Regex::new(r"\\[\\[([^\\]]+)\\]\\]").unwrap();
 
-        // First pass: collect all files
-        let mut all_files = Vec::new();
-        for entry in WalkDir::new(&self.root_path) {
-            if let Ok(entry) = entry {
-                if entry.file_type().is_file() {
-                    let path = entry.path().to_path_buf();
+        for entry_result in fs::read_dir(path).map_err(|e| e.to_string())? {
+            let entry = entry_result.map_err(|e| e.to_string())?;
+            let path = entry.path();
 
-                    // Check if file is an image
-                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                        if image_extensions.contains(&ext.to_lowercase().as_str()) {
-                            self.images.push(path.clone());
-                            continue;
+            if path.is_dir() {
+                self.traverse_directory(&path)?;
+            } else if path.is_file() {
+                if let Some(extension) = path.extension() {
+                    let ext_str = extension.to_string_lossy().to_lowercase();
+
+                    if image_extensions.contains(&ext_str.as_str()) {
+                        self.images.push(path.clone());
+                    } else if ext_str == "md" || ext_str == "txt" {
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            let links = link_re
+                                .captures_iter(&content)
+                                .filter_map(|cap| cap.get(1))
+                                .map(|m| PathBuf::from(m.as_str()))
+                                .collect();
+                            self.files.insert(path.clone(), links);
+
+                            let found_tags: Vec<String> = tag_re
+                                .captures_iter(&content)
+                                .filter_map(|cap| cap.get(1))
+                                .map(|m| m.as_str().to_string())
+                                .collect();
+                            if !found_tags.is_empty() {
+                                self.tags.insert(path.clone(), found_tags);
+                            }
                         }
                     }
-                    all_files.push(path);
                 }
             }
         }
-
-        // Second pass: find links and tags between files
-        for file_path in all_files {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                let re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
-                let links = re
-                    .captures_iter(&content)
-                    .filter_map(|cap| cap.get(1))
-                    .map(|m| self.root_path.join(m.as_str()))
-                    .collect();
-                self.files.insert(file_path.clone(), links);
-
-                // Tag extraction
-                let found_tags: Vec<String> = tag_re
-                    .captures_iter(&content)
-                    .filter_map(|cap| cap.get(1))
-                    .map(|m| m.as_str().to_string())
-                    .collect();
-                if !found_tags.is_empty() {
-                    self.tags.insert(file_path, found_tags); // Store extracted tags
-                }
-            }
-        }
+        Ok(())
     }
 }
