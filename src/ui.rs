@@ -40,6 +40,7 @@ pub struct FileGraphApp {
     current_directory_label: String,
     show_images: bool,
     show_orphans: bool,
+    graph_rect: egui::Rect,
 }
 
 impl App for FileGraphApp {
@@ -157,9 +158,14 @@ impl App for FileGraphApp {
                             );
                         });
                     });
+
                     if ui.button("Reset Node Positions").clicked() {
                         self.physics_simulator
                             .reset_positions(&self.initial_node_layout);
+                    }
+
+                    if ui.button("Center Graph").clicked() {
+                        self.center_graph();
                     }
                 });
             });
@@ -171,6 +177,7 @@ impl App for FileGraphApp {
                 egui::Sense::hover() | egui::Sense::drag() | egui::Sense::click(),
             );
 
+            self.graph_rect = response.rect;
             let graph_rect = response.rect;
             let to_screen = egui::emath::RectTransform::from_to(
                 egui::Rect::from_center_size(egui::Pos2::ZERO, graph_rect.size()),
@@ -186,78 +193,98 @@ impl App for FileGraphApp {
                 self.graph_center_offset += response.drag_delta() / self.graph_zoom_factor;
             }
 
-            let mut scanner_locked = self.scanner.lock().unwrap();
-            self.file_graph.build_from_scanner(&scanner_locked);
-            self.tag_graph.build_from_tags(&scanner_locked);
+            if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+                if let Some(node_idx) = self.selected_node {
+                    self.focus_on_node(node_idx);
+                }
+            }
+
+            {
+                let scanner_locked = self.scanner.lock().unwrap();
+                self.file_graph.build_from_scanner(&scanner_locked);
+                self.tag_graph.build_from_tags(&scanner_locked);
+            }
 
             // node filtering logic:
-            let (nodes_to_draw, edges_to_draw) = match self.current_graph_mode {
-                GraphMode::Links => {
-                    let nodes: Vec<_> = self
-                        .file_graph
-                        .node_indices
-                        .values()
-                        .filter(|&&idx| {
-                            if !self.show_orphans {
-                                // Only show nodes with connections
-                                self.file_graph.graph.neighbors(idx).count() > 0
-                            } else {
-                                true
-                            }
-                        })
-                        .cloned()
-                        .collect();
+            let (nodes_to_draw, edges_to_draw) = {
+                let scanner_locked = self.scanner.lock().unwrap();
 
-                    let edges: Vec<_> = self
-                        .file_graph
-                        .graph
-                        .edge_references()
-                        .map(|e| (e.source(), e.target()))
-                        .collect();
-                    (nodes, edges)
-                }
-                GraphMode::Tags => {
-                    let filtered_tag_nodes: HashMap<_, _> = self
-                        .tag_graph
-                        .tag_node_indices
-                        .iter()
-                        .filter(|(tag_name, _)| {
-                            self.tag_filter_input.is_empty()
-                                || tag_name.contains(&self.tag_filter_input)
-                        })
-                        .map(|(tag_name, &node_idx)| (tag_name.clone(), node_idx))
-                        .collect();
+                match self.current_graph_mode {
+                    GraphMode::Links => {
+                        let nodes: Vec<_> = self
+                            .file_graph
+                            .node_indices
+                            .values()
+                            .filter(|&&idx| {
+                                if !self.show_orphans {
+                                    self.file_graph.graph.neighbors(idx).count() > 0
+                                } else {
+                                    true
+                                }
+                            })
+                            .cloned()
+                            .collect();
 
-                    let mut nodes = Vec::new();
-                    let mut edges = Vec::new();
-
-                    // Add all file nodes when show_orphans is true
-                    if self.show_orphans {
-                        nodes.extend(self.tag_graph.file_node_indices.values());
+                        let edges: Vec<_> = self
+                            .file_graph
+                            .graph
+                            .edge_references()
+                            .map(|e| (e.source(), e.target()))
+                            .collect();
+                        (nodes, edges)
                     }
+                    GraphMode::Tags => {
+                        let filtered_tag_nodes: HashMap<_, _> = self
+                            .tag_graph
+                            .tag_node_indices
+                            .iter()
+                            .filter(|(tag_name, _)| {
+                                self.tag_filter_input.is_empty()
+                                    || tag_name.contains(&self.tag_filter_input)
+                            })
+                            .map(|(tag_name, &node_idx)| (tag_name.clone(), node_idx))
+                            .collect();
 
-                    // Add tagged files
-                    for (file_path, &file_node_idx) in &self.tag_graph.file_node_indices {
-                        if let Some(tags_for_file) = scanner_locked.tags.get(file_path) {
-                            if tags_for_file
-                                .iter()
-                                .any(|tag| filtered_tag_nodes.contains_key(tag))
-                            {
-                                nodes.push(file_node_idx);
+                        let mut nodes = Vec::new();
+                        let mut edges = Vec::new();
+
+                        if self.show_orphans {
+                            nodes.extend(self.tag_graph.file_node_indices.values());
+                        }
+
+                        for (file_path, &file_node_idx) in &self.tag_graph.file_node_indices {
+                            if let Some(tags_for_file) = scanner_locked.tags.get(file_path) {
+                                if tags_for_file
+                                    .iter()
+                                    .any(|tag| filtered_tag_nodes.contains_key(tag))
+                                {
+                                    nodes.push(file_node_idx);
+                                }
                             }
                         }
-                    }
 
-                    // Add tags and their edges
-                    for (_, &tag_node_idx) in &filtered_tag_nodes {
-                        nodes.push(tag_node_idx);
-                        for edge_ref in self.tag_graph.graph.edges(tag_node_idx) {
-                            edges.push((edge_ref.source(), edge_ref.target()));
+                        for (_, &tag_node_idx) in &filtered_tag_nodes {
+                            nodes.push(tag_node_idx);
+                            for edge_ref in self.tag_graph.graph.edges(tag_node_idx) {
+                                edges.push((edge_ref.source(), edge_ref.target()));
+                            }
                         }
+                        (nodes, edges)
                     }
-                    (nodes, edges)
                 }
             };
+
+            // let is_orphan = match self.current_graph_mode {
+            //     GraphMode::Links => false,
+            //     GraphMode::Tags => {
+            //         let path = match &self.tag_graph.graph[node_idx] {
+            //             GraphNode::File(p) => p,
+            //             GraphNode::Tag(_) => continue,
+            //         };
+            //         let scanner_locked = self.scanner.lock().unwrap();
+            //         !scanner_locked.tags.contains_key(Path::new(path))
+            //     }
+            // };
 
             for node_idx in &nodes_to_draw {
                 if !self.physics_simulator.node_positions.contains_key(node_idx) {
@@ -356,7 +383,6 @@ impl App for FileGraphApp {
                                                 .contains(&ext.as_str())
                                         })
                                         .unwrap_or(false);
-
                                     if is_image {
                                         Color32::from_rgb(255, 165, 0)
                                     } else {
@@ -367,6 +393,7 @@ impl App for FileGraphApp {
                             },
                             GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
                                 GraphNode::File(path) => {
+                                    let scanner_locked = self.scanner.lock().unwrap();
                                     let is_orphan =
                                         !scanner_locked.tags.contains_key(Path::new(path));
                                     let is_image = Path::new(path)
@@ -391,7 +418,14 @@ impl App for FileGraphApp {
                         }
                     };
 
-                    painter.circle_filled(screen_pos, node_radius, node_color);
+                    // Pulse effect for selected node
+                    let pulse = if Some(node_idx) == self.selected_node {
+                        ctx.input(|i| i.time as f32).sin().abs() * 0.2 + 0.8
+                    } else {
+                        1.0
+                    };
+
+                    painter.circle_filled(screen_pos, node_radius * pulse, node_color);
 
                     let display_name = if self.show_full_paths {
                         node_name.clone()
@@ -489,6 +523,7 @@ impl App for FileGraphApp {
                     }
 
                     if node_response.hovered() {
+                        let node_idx_copy = node_idx;
                         egui::show_tooltip_at_pointer(
                             ctx,
                             egui::LayerId::background(),
@@ -505,6 +540,10 @@ impl App for FileGraphApp {
                                     },
                                 };
                                 ui.label(full_name);
+
+                                if ui.button("Focus").clicked() {
+                                    self.focus_on_node(node_idx);
+                                }
                             },
                         );
                     }
@@ -525,9 +564,9 @@ impl App for FileGraphApp {
                         *content = text;
                     }
                 } else if let Some(texture) = &self.selected_image {
-                    // Improved image preview
+                    // image preview
                     ui.vertical_centered(|ui| {
-                        let available_width = ui.available_width() - 20.0; // Add some padding
+                        let available_width = ui.available_width() - 20.0;
                         let img_size = texture.size_vec2();
                         let ratio = img_size.y / img_size.x;
                         let desired_height = available_width * ratio;
@@ -552,6 +591,24 @@ impl App for FileGraphApp {
 }
 
 impl FileGraphApp {
+    fn focus_on_node(&mut self, node_idx: petgraph::graph::NodeIndex) {
+        if let Some(node_pos) = self.physics_simulator.get_node_position(node_idx) {
+            // Calculate the offset needed to center focused node
+            let screen_center = egui::Vec2::new(
+                self.graph_rect.width() / 2.0,
+                self.graph_rect.height() / 2.0,
+            );
+
+            self.graph_center_offset = screen_center - *node_pos;
+            self.graph_zoom_factor = 1.5;
+        }
+    }
+
+    fn center_graph(&mut self) {
+        self.graph_center_offset = egui::Vec2::ZERO;
+        self.graph_zoom_factor = 1.0;
+    }
+
     pub fn new(scan_dir: PathBuf) -> Self {
         let current_dir = scan_dir.join("dummy_dir");
         if !current_dir.exists() {
@@ -636,6 +693,7 @@ impl FileGraphApp {
             current_directory_label,
             show_images: true,
             show_orphans: true,
+            graph_rect: egui::Rect::NOTHING,
         }
     }
 }

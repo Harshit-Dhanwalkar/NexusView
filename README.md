@@ -15,11 +15,6 @@ NexusView is a desktop application built with Rust and the `egui` framework, des
 - **Physics Simulation Controls**
 - **Built with Rust** for performance
 
-## Screenshots
-
-![Tag Graph View](assets/tag-graph-view.png)
-![Image Preview](assets/image-preview.png)
-
 ## Getting Started
 
 ### Prerequisites
@@ -39,8 +34,11 @@ cargo run --release -- /path/to/your/directory
 ## Todo
 
 - [ ] Fix graph zooming
+- [ ] Fix graph panning
 - [ ] "Show Orphans" unexpected behavior
 - [ ] "Show Images" toggle responsiveness
+- [ ] Fix Focus on Node (re-center and zoom on selected node)
+
 - [ ] **Graph Interaction and Visualization Enhancements:**
   - [ ] Colors based on file type/tags
   - [ ] Node Grouping/Clustering
@@ -51,7 +49,6 @@ cargo run --release -- /path/to/your/directory
   - [ ] "Freeze" Physics (button to pause simulation)
   - [x] Layout Reset (button to reset node positions)
   - [ ] Graph Search (find nodes by filename or content)
-  - [ ] Focus on Node (re-center and zoom on selected node)
 - [ ] **Data and Content Enhancements:**
   - [ ] Relative Path Links (full support for `../` and `./` links)
   - [ ] URL/External Links (identify and open external URLs)
