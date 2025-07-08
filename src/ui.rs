@@ -52,6 +52,9 @@ pub struct FileGraphApp {
     search_query: String,
     search_results: Vec<NodeIndex>,
     current_search_result: usize,
+    open_menu_on_node: Option<NodeIndex>,
+    right_click_menu_pos: Option<egui::Pos2>,
+    menu_open: bool,
 }
 
 impl App for FileGraphApp {
@@ -539,6 +542,32 @@ impl App for FileGraphApp {
                         self.last_drag_pos = None;
                     }
 
+                    // Hover effect for absolute path
+                    if node_response.hovered() {
+                        let full_name = match self.current_graph_mode {
+                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                GraphNode::File(file_path_str) => file_path_str.clone(),
+                                GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
+                            },
+                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                GraphNode::File(file_path_str) => file_path_str.clone(),
+                                GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
+                            },
+                        };
+                        egui::show_tooltip_at_pointer(
+                            ctx,
+                            egui::LayerId::background(),
+                            egui::Id::new("node_tooltip").with(node_idx),
+                            |ui| {
+                                ui.label(full_name);
+                                if ui.button("Focus").clicked() {
+                                    self.focus_on_node(node_idx);
+                                }
+                            },
+                        );
+                    }
+
+                    // Left-click to select node and show content
                     if node_response.clicked() {
                         self.selected_node = Some(node_idx);
                         self.selected_image = None;
@@ -591,30 +620,97 @@ impl App for FileGraphApp {
                         }
                     }
 
-                    if node_response.hovered() {
-                        let node_idx_copy = node_idx;
-                        egui::show_tooltip_at_pointer(
-                            ctx,
-                            egui::LayerId::background(),
-                            egui::Id::new("node_tooltip"),
-                            |ui| {
-                                let full_name = match self.current_graph_mode {
-                                    GraphMode::Links => match &self.file_graph.graph[node_idx] {
-                                        GraphNode::File(file_path_str) => file_path_str.clone(),
-                                        GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
-                                    },
-                                    GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
-                                        GraphNode::File(file_path_str) => file_path_str.clone(),
-                                        GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
-                                    },
-                                };
-                                ui.label(full_name);
+                    // Right-click to open menu
+                    if node_response.clicked_by(egui::PointerButton::Secondary) {
+                        self.open_menu_on_node = Some(node_idx);
+                        // Store the current pointer position for the menu
+                        self.right_click_menu_pos = ctx.input(|i| i.pointer.interact_pos());
+                        self.menu_open = true;
+                    }
+                }
+            }
 
-                                if ui.button("Focus").clicked() {
-                                    self.focus_on_node(node_idx);
+            // Render the custom right-click menu as an egui::Window
+            if let Some(menu_node_idx) = self.open_menu_on_node {
+                if let Some(menu_pos) = self.right_click_menu_pos {
+                    // Use the stored mouse position
+                    let mut is_open = true;
+                    let window_response = egui::Window::new("Node Actions")
+                        .id(egui::Id::new("right_click_node_menu").with(menu_node_idx))
+                        .default_pos(menu_pos)
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(200.0)
+                        .show(ctx, |ui| {
+                            let full_name_for_menu = match self.current_graph_mode {
+                                GraphMode::Links => match &self.file_graph.graph[menu_node_idx] {
+                                    GraphNode::File(file_path_str) => file_path_str.clone(),
+                                    GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
+                                },
+                                GraphMode::Tags => match &self.tag_graph.graph[menu_node_idx] {
+                                    GraphNode::File(file_path_str) => file_path_str.clone(),
+                                    GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
+                                },
+                            };
+                            ui.label(full_name_for_menu);
+                            ui.separator();
+
+                            let path_buf_option = match self.current_graph_mode {
+                                GraphMode::Links => match &self.file_graph.graph[menu_node_idx] {
+                                    GraphNode::File(s) => Some(PathBuf::from(s)),
+                                    GraphNode::Tag(_) => None,
+                                },
+                                GraphMode::Tags => match &self.tag_graph.graph[menu_node_idx] {
+                                    GraphNode::File(s) => Some(PathBuf::from(s)),
+                                    GraphNode::Tag(_) => None,
+                                },
+                            };
+
+                            if let Some(path_buf) = path_buf_option {
+                                if path_buf.is_file() {
+                                    if ui.button("Open File").clicked() {
+                                        #[cfg(target_os = "linux")]
+                                        {
+                                            std::process::Command::new("xdg-open")
+                                                .arg(&path_buf)
+                                                .spawn()
+                                                .expect("Failed to open file");
+                                        }
+                                        #[cfg(target_os = "macos")]
+                                        {
+                                            std::process::Command::new("open")
+                                                .arg(&path_buf)
+                                                .spawn()
+                                                .expect("Failed to open file");
+                                        }
+                                        #[cfg(target_os = "windows")]
+                                        {
+                                            std::process::Command::new("cmd")
+                                                .arg("/C")
+                                                .arg("start")
+                                                .arg(&path_buf)
+                                                .spawn()
+                                                .expect("Failed to open file");
+                                        }
+                                        is_open = false;
+                                    }
+                                    if ui.button("Copy Path").clicked() {
+                                        ctx.copy_text(path_buf.to_string_lossy().to_string());
+                                        is_open = false;
+                                    }
                                 }
-                            },
-                        );
+                            }
+                        })
+                        .unwrap();
+
+                    if !self.menu_open && window_response.response.clicked_elsewhere() {
+                        is_open = false;
+                    }
+                    self.menu_open = false;
+
+                    if !is_open {
+                        self.open_menu_on_node = None;
+                        self.right_click_menu_pos = None;
                     }
                 }
             }
@@ -780,13 +876,10 @@ impl FileGraphApp {
 
         let mut physics_simulator = PhysicsSimulator::new();
         let mut initial_node_layout = HashMap::new();
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
 
         for &node_idx in graph.node_indices.values() {
-            let random_pos = egui::vec2(
-                rng.random_range(-100.0..100.0),
-                rng.random_range(-100.0..100.0),
-            );
+            let random_pos = egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
             physics_simulator
                 .node_positions
                 .insert(node_idx, random_pos);
@@ -795,10 +888,8 @@ impl FileGraphApp {
 
         for &node_idx in tag_graph.file_node_indices.values() {
             if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos = egui::vec2(
-                    rng.random_range(-100.0..100.0),
-                    rng.random_range(-100.0..100.0),
-                );
+                let random_pos =
+                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
                 physics_simulator
                     .node_positions
                     .insert(node_idx, random_pos);
@@ -808,10 +899,8 @@ impl FileGraphApp {
 
         for &node_idx in tag_graph.tag_node_indices.values() {
             if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos = egui::vec2(
-                    rng.random_range(-100.0..100.0),
-                    rng.random_range(-100.0..100.0),
-                );
+                let random_pos =
+                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
                 physics_simulator
                     .node_positions
                     .insert(node_idx, random_pos);
@@ -853,6 +942,9 @@ impl FileGraphApp {
             search_query: String::new(),
             search_results: Vec::new(),
             current_search_result: 0,
+            open_menu_on_node: None,
+            right_click_menu_pos: None,
+            menu_open: false,
         }
     }
 }

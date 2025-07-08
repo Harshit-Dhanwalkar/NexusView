@@ -65,7 +65,7 @@ cargo run --release -- /path/to/your/directory
 - [ ] **Usability and Polish:**
   - [x] Progress Indicators (for scanning and graph building)
   - [ ] Improved Error Handling & Messaging
-  - [ ] Context Menus (right-click actions on nodes/files)
+  - [x] Context Menus (right-click actions on nodes/files)
   - [ ] Drag and Drop (files into app, or nodes for re-linking)
   - [ ] Multi-selection of Nodes
 - [ ] **Performance and Scalability:**

@@ -15,4 +15,4 @@ image = "0.25.6"                                   # For image loading and proce
 egui_extras = "0.31.1"                             # For better image display in egui
 rand = "0.9.1"
 egui_commonmark = "0.20.0"                         # For Markdown rendering
-pulldown-cmark = "0.13.0"                          # For markdown parser
+# pulldown-cmark = "0.13.0"                          # For markdown parser
