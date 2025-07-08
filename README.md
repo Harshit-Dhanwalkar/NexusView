@@ -35,9 +35,10 @@ cargo run --release -- /path/to/your/directory
 
 - [ ] Fix graph zooming
 - [ ] Fix graph panning
+- [ ] "Show Images" toggle for grpah mode link doesn't work (but work for tag mode)
 - [ ] "Show Orphans" unexpected behavior
-- [ ] "Show Images" toggle responsiveness
 - [ ] Fix Focus on Node (re-center and zoom on selected node)
+- [ ] Grpah mode link and tag in one with toggle
 
 - [ ] **Graph Interaction and Visualization Enhancements:**
   - [ ] Colors based on file type/tags

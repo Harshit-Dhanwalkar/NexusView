@@ -39,7 +39,7 @@ pub struct FileGraphApp {
     last_drag_pos: Option<egui::Pos2>,
     current_directory_label: String,
     show_images: bool,
-    show_orphans: bool,
+    // show_orphans: bool,
     graph_rect: egui::Rect,
 }
 
@@ -73,7 +73,7 @@ impl App for FileGraphApp {
                 }
 
                 ui.checkbox(&mut self.show_full_paths, "Show Full Paths");
-                ui.checkbox(&mut self.show_orphans, "Show Orphans");
+                // ui.checkbox(&mut self.show_orphans, "Show Orphans");
                 ui.checkbox(&mut self.show_images, "Show Images");
 
                 ui.separator();
@@ -211,19 +211,8 @@ impl App for FileGraphApp {
 
                 match self.current_graph_mode {
                     GraphMode::Links => {
-                        let nodes: Vec<_> = self
-                            .file_graph
-                            .node_indices
-                            .values()
-                            .filter(|&&idx| {
-                                if !self.show_orphans {
-                                    self.file_graph.graph.neighbors(idx).count() > 0
-                                } else {
-                                    true
-                                }
-                            })
-                            .cloned()
-                            .collect();
+                        let nodes: Vec<_> =
+                            self.file_graph.node_indices.values().cloned().collect();
 
                         let edges: Vec<_> = self
                             .file_graph
@@ -248,21 +237,15 @@ impl App for FileGraphApp {
                         let mut nodes = Vec::new();
                         let mut edges = Vec::new();
 
-                        if self.show_orphans {
-                            nodes.extend(self.tag_graph.file_node_indices.values());
+                        // Always include all file nodes with tags
+                        nodes.extend(self.tag_graph.file_node_indices.values());
+
+                        // Include images if show_images is true
+                        if self.show_images {
+                            nodes.extend(self.tag_graph.image_node_indices.values());
                         }
 
-                        for (file_path, &file_node_idx) in &self.tag_graph.file_node_indices {
-                            if let Some(tags_for_file) = scanner_locked.tags.get(file_path) {
-                                if tags_for_file
-                                    .iter()
-                                    .any(|tag| filtered_tag_nodes.contains_key(tag))
-                                {
-                                    nodes.push(file_node_idx);
-                                }
-                            }
-                        }
-
+                        // Include tag nodes that match the filter
                         for (_, &tag_node_idx) in &filtered_tag_nodes {
                             nodes.push(tag_node_idx);
                             for edge_ref in self.tag_graph.graph.edges(tag_node_idx) {
@@ -273,18 +256,6 @@ impl App for FileGraphApp {
                     }
                 }
             };
-
-            // let is_orphan = match self.current_graph_mode {
-            //     GraphMode::Links => false,
-            //     GraphMode::Tags => {
-            //         let path = match &self.tag_graph.graph[node_idx] {
-            //             GraphNode::File(p) => p,
-            //             GraphNode::Tag(_) => continue,
-            //         };
-            //         let scanner_locked = self.scanner.lock().unwrap();
-            //         !scanner_locked.tags.contains_key(Path::new(path))
-            //     }
-            // };
 
             for node_idx in &nodes_to_draw {
                 if !self.physics_simulator.node_positions.contains_key(node_idx) {
@@ -394,8 +365,8 @@ impl App for FileGraphApp {
                             GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
                                 GraphNode::File(path) => {
                                     let scanner_locked = self.scanner.lock().unwrap();
-                                    let is_orphan =
-                                        !scanner_locked.tags.contains_key(Path::new(path));
+                                    let has_tags =
+                                        scanner_locked.tags.contains_key(Path::new(path));
                                     let is_image = Path::new(path)
                                         .extension()
                                         .map(|ext| {
@@ -405,12 +376,12 @@ impl App for FileGraphApp {
                                         })
                                         .unwrap_or(false);
 
-                                    if is_orphan {
-                                        Color32::GRAY
-                                    } else if is_image {
-                                        Color32::from_rgb(255, 165, 0)
-                                    } else {
+                                    if is_image {
+                                        Color32::from_rgb(255, 165, 0) // Orange for images
+                                    } else if has_tags {
                                         Color32::BLUE
+                                    } else {
+                                        Color32::GRAY
                                     }
                                 }
                                 GraphNode::Tag(_) => Color32::GREEN,
@@ -692,7 +663,7 @@ impl FileGraphApp {
             last_drag_pos: None,
             current_directory_label,
             show_images: true,
-            show_orphans: true,
+            // show_orphans: true,
             graph_rect: egui::Rect::NOTHING,
         }
     }

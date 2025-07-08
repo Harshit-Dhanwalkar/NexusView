@@ -18,6 +18,7 @@ pub struct FileGraph {
 pub struct TagGraph {
     pub graph: Graph<GraphNode, ()>,
     pub file_node_indices: HashMap<PathBuf, NodeIndex>,
+    pub image_node_indices: HashMap<PathBuf, NodeIndex>,
     pub tag_node_indices: HashMap<String, NodeIndex>,
 }
 
@@ -72,14 +73,17 @@ impl TagGraph {
             graph: Graph::new(),
             file_node_indices: HashMap::new(),
             tag_node_indices: HashMap::new(),
+            image_node_indices: HashMap::new(),
         }
     }
 
     pub fn build_from_tags(&mut self, scanner: &file_scan::FileScanner) {
         self.graph.clear();
         self.file_node_indices.clear();
+        self.image_node_indices.clear();
         self.tag_node_indices.clear();
 
+        // Add all files with tags
         for (file_path, tags) in &scanner.tags {
             if !tags.is_empty() {
                 let node_data = GraphNode::File(file_path.display().to_string());
@@ -88,6 +92,16 @@ impl TagGraph {
             }
         }
 
+        // Add all images
+        for image_path in &scanner.images {
+            if !self.image_node_indices.contains_key(image_path) {
+                let node_data = GraphNode::File(image_path.display().to_string());
+                let node_idx = self.graph.add_node(node_data);
+                self.image_node_indices.insert(image_path.clone(), node_idx);
+            }
+        }
+
+        // Create tag relationships
         for (file_path, tags) in &scanner.tags {
             if let Some(&file_node_idx) = self.file_node_indices.get(file_path) {
                 for tag in tags {
