@@ -35,10 +35,11 @@ cargo run --release -- /path/to/your/directory
 
 - [ ] Fix graph zooming
 - [ ] Fix graph panning
-- [ ] "Show Images" toggle for grpah mode link doesn't work (but work for tag mode)
+- [ ] "Show Images" toggle for graph mode link doesn't work (but work for tag mode)
 - [ ] "Show Orphans" unexpected behavior
 - [ ] Fix Focus on Node (re-center and zoom on selected node)
-- [ ] Grpah mode link and tag in one with toggle
+- [ ] Graph mode link and tag in one with toggle
+- [ ] Graph Search `Next` and `Previous` buttons are doing unexpected behavior
 
 - [ ] **Graph Interaction and Visualization Enhancements:**
   - [ ] Colors based on file type/tags
@@ -49,7 +50,7 @@ cargo run --release -- /path/to/your/directory
   - [x] Dynamic Physics Parameters (UI controls for damping, spring constant, etc.)
   - [ ] "Freeze" Physics (button to pause simulation)
   - [x] Layout Reset (button to reset node positions)
-  - [ ] Graph Search (find nodes by filename or content)
+  - [x] Graph Search (find nodes by filename or content)
 - [ ] **Data and Content Enhancements:**
   - [ ] Relative Path Links (full support for `../` and `./` links)
   - [ ] URL/External Links (identify and open external URLs)

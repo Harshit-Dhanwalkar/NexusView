@@ -1,6 +1,7 @@
 // src/ui.rs
 use eframe::{App, egui};
 use egui_commonmark::CommonMarkViewer;
+use petgraph::stable_graph::NodeIndex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,9 @@ pub struct FileGraphApp {
     graph_build_progress: f32,
     graph_build_status: String,
     scan_progress_receiver: Option<std::sync::mpsc::Receiver<(f32, String)>>,
+    search_query: String,
+    search_results: Vec<NodeIndex>,
+    current_search_result: usize,
 }
 
 impl App for FileGraphApp {
@@ -215,6 +219,29 @@ impl App for FileGraphApp {
                     }
                 });
             });
+
+            // Graph Search section
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Search:");
+                if ui.text_edit_singleline(&mut self.search_query).changed() {
+                    self.perform_search();
+                }
+
+                if !self.search_results.is_empty() {
+                    ui.label(format!(
+                        "{} of {}",
+                        self.current_search_result + 1,
+                        self.search_results.len()
+                    ));
+                    if ui.button("◀").clicked() {
+                        self.focus_prev_search_result();
+                    }
+                    if ui.button("▶").clicked() {
+                        self.focus_next_search_result();
+                    }
+                }
+            });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -258,6 +285,14 @@ impl App for FileGraphApp {
                 if let Some(node_idx) = self.selected_node {
                     self.focus_on_node(node_idx);
                 }
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
+                self.focus_next_search_result();
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::F3) && i.modifiers.shift) {
+                self.focus_prev_search_result();
             }
 
             {
@@ -402,6 +437,8 @@ impl App for FileGraphApp {
                     let node_radius = 15.0 * self.graph_zoom_factor;
                     let node_color = if Some(node_idx) == self.selected_node {
                         Color32::from_rgb(255, 100, 100)
+                    } else if self.search_results.contains(&node_idx) {
+                        Color32::from_rgb(100, 255, 100)
                     } else {
                         match self.current_graph_mode {
                             GraphMode::Links => match &self.file_graph.graph[node_idx] {
@@ -646,6 +683,63 @@ impl App for FileGraphApp {
 }
 
 impl FileGraphApp {
+    fn perform_search(&mut self) {
+        self.search_results.clear();
+        self.current_search_result = 0;
+
+        let query = self.search_query.to_lowercase();
+        if query.is_empty() {
+            return;
+        }
+
+        let scanner = self.scanner.lock().unwrap();
+        let graph = match self.current_graph_mode {
+            GraphMode::Links => &self.file_graph.graph,
+            GraphMode::Tags => &self.tag_graph.graph,
+        };
+
+        for node_idx in graph.node_indices() {
+            match &graph[node_idx] {
+                GraphNode::File(path) => {
+                    // Search in filename
+                    if path.to_lowercase().contains(&query) {
+                        self.search_results.push(node_idx);
+                        continue;
+                    }
+
+                    // Search in file content
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        if content.to_lowercase().contains(&query) {
+                            self.search_results.push(node_idx);
+                        }
+                    }
+                }
+                GraphNode::Tag(tag) => {
+                    if tag.to_lowercase().contains(&query) {
+                        self.search_results.push(node_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    fn focus_next_search_result(&mut self) {
+        if self.search_results.is_empty() {
+            return;
+        }
+        self.current_search_result = (self.current_search_result + 1) % self.search_results.len();
+        self.focus_on_node(self.search_results[self.current_search_result]);
+    }
+
+    fn focus_prev_search_result(&mut self) {
+        if self.search_results.is_empty() {
+            return;
+        }
+        self.current_search_result = (self.current_search_result + self.search_results.len() - 1)
+            % self.search_results.len();
+        self.focus_on_node(self.search_results[self.current_search_result]);
+    }
+
     fn focus_on_node(&mut self, node_idx: petgraph::graph::NodeIndex) {
         if let Some(node_pos) = self.physics_simulator.get_node_position(node_idx) {
             // Calculate the offset needed to center focused node
@@ -756,6 +850,9 @@ impl FileGraphApp {
             graph_build_progress: 0.0,
             graph_build_status: String::new(),
             scan_progress_receiver: None,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            current_search_result: 0,
         }
     }
 }
