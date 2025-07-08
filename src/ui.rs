@@ -1,5 +1,6 @@
 // src/ui.rs
 use eframe::{App, egui};
+use egui_commonmark::CommonMarkViewer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,7 @@ pub struct FileGraphApp {
     show_images: bool,
     // show_orphans: bool,
     graph_rect: egui::Rect,
+    markdown_cache: egui_commonmark::CommonMarkCache,
 }
 
 impl App for FileGraphApp {
@@ -377,7 +379,7 @@ impl App for FileGraphApp {
                                         .unwrap_or(false);
 
                                     if is_image {
-                                        Color32::from_rgb(255, 165, 0) // Orange for images
+                                        Color32::from_rgb(255, 165, 0)
                                     } else if has_tags {
                                         Color32::BLUE
                                     } else {
@@ -526,13 +528,36 @@ impl App for FileGraphApp {
             ui.heading("Content Preview");
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Some(content) = &mut self.selected_file_content {
-                    let mut text = content.clone();
-                    ui.add(
-                        egui::TextEdit::multiline(&mut text).desired_width(ui.available_width()),
-                    );
-                    if text != *content {
-                        *content = text;
+                if let Some(content) = &self.selected_file_content {
+                    // Check if this is a markdown file
+                    let is_markdown = if let Some(node_idx) = self.selected_node {
+                        let path_str = match self.current_graph_mode {
+                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                GraphNode::File(s) => s,
+                                GraphNode::Tag(_) => "",
+                            },
+                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                GraphNode::File(s) => s,
+                                GraphNode::Tag(_) => "",
+                            },
+                        };
+                        Path::new(path_str)
+                            .extension()
+                            .map(|ext| ext == "md" || ext == "markdown")
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if is_markdown {
+                        CommonMarkViewer::new().show(ui, &mut self.markdown_cache, content);
+                    } else {
+                        // Regular text file display
+                        let mut text = content.clone();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut text)
+                                .desired_width(ui.available_width()),
+                        );
                     }
                 } else if let Some(texture) = &self.selected_image {
                     // image preview
@@ -665,6 +690,7 @@ impl FileGraphApp {
             show_images: true,
             // show_orphans: true,
             graph_rect: egui::Rect::NOTHING,
+            markdown_cache: egui_commonmark::CommonMarkCache::default(),
         }
     }
 }
