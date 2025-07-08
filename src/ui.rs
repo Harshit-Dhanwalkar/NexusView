@@ -11,8 +11,18 @@ use crate::file_scan::FileScanner;
 use crate::graph::{FileGraph, GraphNode, TagGraph};
 use crate::physics_nodes::PhysicsSimulator;
 use egui::{Color32, Sense, Stroke, pos2, vec2};
+use once_cell::sync::Lazy;
 use petgraph::visit::EdgeRef;
 use rand::Rng;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme, ThemeSet};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::util::LinesWithEndings;
+
+// Lazy-loaded syntax set and theme
+static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(|| SyntaxSet::load_defaults_newlines());
+static THEME_SET: Lazy<ThemeSet> = Lazy::new(|| ThemeSet::load_defaults());
+static DEFAULT_THEME: Lazy<&'static Theme> = Lazy::new(|| &THEME_SET.themes["base16-ocean.dark"]);
 
 #[derive(PartialEq)]
 enum GraphMode {
@@ -55,6 +65,8 @@ pub struct FileGraphApp {
     open_menu_on_node: Option<NodeIndex>,
     right_click_menu_pos: Option<egui::Pos2>,
     menu_open: bool,
+    syntax_cache: HashMap<String, SyntaxReference>,
+    markdown_syntax: Option<SyntaxReference>,
 }
 
 impl App for FileGraphApp {
@@ -720,60 +732,92 @@ impl App for FileGraphApp {
             ui.heading("Content Preview");
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Some(content) = &self.selected_file_content {
-                    // Check if this is a markdown file
-                    let is_markdown = if let Some(node_idx) = self.selected_node {
+                enum ContentToRender {
+                    Markdown(String),
+                    Code { content: String, path: PathBuf },
+                    Image(egui::TextureHandle),
+                    None,
+                }
+
+                let content_to_render = match (&self.selected_file_content, self.selected_node) {
+                    (Some(content), Some(node_idx)) => {
                         let path_str = match self.current_graph_mode {
                             GraphMode::Links => match &self.file_graph.graph[node_idx] {
                                 GraphNode::File(s) => s,
-                                GraphNode::Tag(_) => "",
+                                GraphNode::Tag(_) => return,
                             },
                             GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
                                 GraphNode::File(s) => s,
-                                GraphNode::Tag(_) => "",
+                                GraphNode::Tag(_) => return,
                             },
                         };
-                        Path::new(path_str)
-                            .extension()
-                            .map(|ext| ext == "md" || ext == "markdown")
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    };
 
-                    if is_markdown {
-                        CommonMarkViewer::new().show(ui, &mut self.markdown_cache, content);
-                    } else {
-                        // Regular text file display
-                        let mut text = content.clone();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut text)
-                                .desired_width(ui.available_width()),
-                        );
+                        let path = Path::new(path_str);
+                        if path.extension().map_or(false, |ext| {
+                            let ext = ext.to_string_lossy().to_lowercase();
+                            ext == "md" || ext == "markdown"
+                        }) {
+                            ContentToRender::Markdown(content.clone())
+                        } else {
+                            ContentToRender::Code {
+                                content: content.clone(),
+                                path: path.to_path_buf(),
+                            }
+                        }
                     }
-                } else if let Some(texture) = &self.selected_image {
-                    // image preview
-                    ui.vertical_centered(|ui| {
-                        let available_width = ui.available_width() - 20.0;
-                        let img_size = texture.size_vec2();
-                        let ratio = img_size.y / img_size.x;
-                        let desired_height = available_width * ratio;
+                    (None, _) if self.selected_image.is_some() => {
+                        ContentToRender::Image(self.selected_image.as_ref().unwrap().clone())
+                    }
+                    _ => ContentToRender::None,
+                };
 
-                        // Show image dimensions
-                        ui.label(format!(
-                            "Image: {}×{}",
-                            img_size.x as i32, img_size.y as i32
-                        ));
+                // Now render the content
+                match content_to_render {
+                    ContentToRender::Markdown(content) => {
+                        CommonMarkViewer::new()
+                            .max_image_width(Some(ui.available_width() as usize))
+                            .show(ui, &mut self.markdown_cache, &content);
+                    }
+                    ContentToRender::Code { content, path } => {
+                        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                            if let Some(syntax) = SYNTAX_SET.find_syntax_by_extension(ext) {
+                                self.render_code_block(ui, &content, syntax);
+                            } else {
+                                let mut text = content;
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut text)
+                                        .desired_width(ui.available_width()),
+                                );
+                            }
+                        } else {
+                            let mut text = content;
+                            ui.add(
+                                egui::TextEdit::multiline(&mut text)
+                                    .desired_width(ui.available_width()),
+                            );
+                        }
+                    }
+                    ContentToRender::Image(texture) => {
+                        ui.vertical_centered(|ui| {
+                            let available_width = ui.available_width() - 20.0;
+                            let img_size = texture.size_vec2();
+                            let ratio = img_size.y / img_size.x;
+                            let desired_height = available_width * ratio;
 
-                        // Display the image with maximum width while maintaining aspect ratio
-                        ui.image(texture);
-                    });
-                } else {
-                    ui.label("Select a file or image to preview its content.");
+                            ui.label(format!(
+                                "Image: {}×{}",
+                                img_size.x as i32, img_size.y as i32
+                            ));
+
+                            ui.image(&texture);
+                        });
+                    }
+                    ContentToRender::None => {
+                        ui.label("Select a file or image to preview its content.");
+                    }
                 }
             });
         });
-
         ctx.request_repaint();
     }
 }
@@ -876,10 +920,16 @@ impl FileGraphApp {
 
         let mut physics_simulator = PhysicsSimulator::new();
         let mut initial_node_layout = HashMap::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
+
+        let markdown_syntax = SYNTAX_SET.find_syntax_by_extension("md").cloned();
+        let syntax_cache = HashMap::new();
 
         for &node_idx in graph.node_indices.values() {
-            let random_pos = egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+            let random_pos = egui::vec2(
+                rng.random_range(-100.0..100.0),
+                rng.random_range(-100.0..100.0),
+            );
             physics_simulator
                 .node_positions
                 .insert(node_idx, random_pos);
@@ -888,8 +938,10 @@ impl FileGraphApp {
 
         for &node_idx in tag_graph.file_node_indices.values() {
             if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos =
-                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                let random_pos = egui::vec2(
+                    rng.random_range(-100.0..100.0),
+                    rng.random_range(-100.0..100.0),
+                );
                 physics_simulator
                     .node_positions
                     .insert(node_idx, random_pos);
@@ -899,8 +951,10 @@ impl FileGraphApp {
 
         for &node_idx in tag_graph.tag_node_indices.values() {
             if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos =
-                    egui::vec2(rng.gen_range(-100.0..100.0), rng.gen_range(-100.0..100.0));
+                let random_pos = egui::vec2(
+                    rng.random_range(-100.0..100.0),
+                    rng.random_range(-100.0..100.0),
+                );
                 physics_simulator
                     .node_positions
                     .insert(node_idx, random_pos);
@@ -945,6 +999,128 @@ impl FileGraphApp {
             open_menu_on_node: None,
             right_click_menu_pos: None,
             menu_open: false,
+            syntax_cache,
+            markdown_syntax,
+        }
+    }
+
+    fn render_code_block(&self, ui: &mut egui::Ui, code: &str, syntax: &SyntaxReference) {
+        let theme = &DEFAULT_THEME;
+        let mut h = HighlightLines::new(syntax, theme);
+
+        egui::ScrollArea::both().show(ui, |ui| {
+            ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            let mut layout_job = egui::text::LayoutJob::default();
+
+            for line in LinesWithEndings::from(code) {
+                if let Ok(ranges) = h.highlight_line(line, &SYNTAX_SET) {
+                    for (style, text) in ranges {
+                        let color = style.foreground;
+                        let egui_color = Color32::from_rgb(color.r, color.g, color.b);
+                        layout_job.append(
+                            text,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::monospace(12.0),
+                                color: egui_color,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
+
+            ui.label(layout_job);
+        });
+    }
+
+    fn render_file_content(&mut self, ui: &mut egui::Ui, content: &str, path: &Path) {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext_lower = ext.to_lowercase();
+
+            // Handle markdown files
+            if ext_lower == "md" || ext_lower == "markdown" {
+                self.render_markdown(ui, content);
+                return;
+            }
+
+            // Handle code files
+            if let Some(syntax) = SYNTAX_SET.find_syntax_by_extension(&ext_lower) {
+                self.render_code_block(ui, content, syntax);
+                return;
+            }
+        }
+
+        // Fallback to plain text
+        let mut text = content.to_string();
+        ui.add(egui::TextEdit::multiline(&mut text).desired_width(ui.available_width()));
+    }
+
+    fn render_markdown(&mut self, ui: &mut egui::Ui, content: &str) {
+        let mut in_code_block = false;
+        let mut current_lang = "";
+        let mut code_block_content = String::new();
+
+        for line in content.lines() {
+            if line.starts_with("```") {
+                if in_code_block {
+                    if let Some(syntax) = self.get_syntax_for_language(current_lang) {
+                        self.render_code_block(ui, &code_block_content, syntax);
+                    } else {
+                        // Fallback to plain text for unknown languages
+                        let mut text = code_block_content.clone();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(ui.available_width()),
+                        );
+                    }
+                    code_block_content.clear();
+                    in_code_block = false;
+                } else {
+                    current_lang = line.trim_start_matches("```").trim();
+                    in_code_block = true;
+                }
+            } else if in_code_block {
+                code_block_content.push_str(line);
+                code_block_content.push('\n');
+            } else {
+                CommonMarkViewer::new()
+                    .max_image_width(Some(ui.available_width() as usize))
+                    .show(ui, &mut self.markdown_cache, line);
+            }
+        }
+
+        if in_code_block && !code_block_content.is_empty() {
+            if let Some(syntax) = self.get_syntax_for_language(current_lang) {
+                self.render_code_block(ui, &code_block_content, syntax);
+            } else {
+                let mut text = code_block_content;
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(ui.available_width()),
+                );
+            }
+        }
+    }
+
+    fn get_syntax_for_language(&self, lang: &str) -> Option<&SyntaxReference> {
+        match lang.to_lowercase().as_str() {
+            "" => Some(SYNTAX_SET.find_syntax_plain_text()),
+            "python" | "py" => SYNTAX_SET.find_syntax_by_extension("py"),
+            "c" | "cpp" | "h" => SYNTAX_SET.find_syntax_by_extension("c"),
+            "rust" | "rs" => SYNTAX_SET.find_syntax_by_extension("rs"),
+            "javascript" | "js" => SYNTAX_SET.find_syntax_by_extension("js"),
+            "html" => SYNTAX_SET.find_syntax_by_extension("html"),
+            "css" => SYNTAX_SET.find_syntax_by_extension("css"),
+            "bash" | "sh" => SYNTAX_SET.find_syntax_by_extension("sh"),
+            "markdown" | "md" => SYNTAX_SET.find_syntax_by_extension("md"),
+            _ => SYNTAX_SET
+                .find_syntax_by_extension(lang)
+                .or_else(|| Some(SYNTAX_SET.find_syntax_plain_text())),
         }
     }
 }

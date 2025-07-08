@@ -16,3 +16,5 @@ egui_extras = "0.31.1"                             # For better image display in
 rand = "0.9.1"
 egui_commonmark = "0.20.0"                         # For Markdown rendering
 # pulldown-cmark = "0.13.0"                          # For markdown parser
+syntect = "5.2.0"
+once_cell = "1.21.3"                               # For lazy initialization of syntax sets

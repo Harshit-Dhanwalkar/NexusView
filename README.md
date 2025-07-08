@@ -54,7 +54,7 @@ cargo run --release -- /path/to/your/directory
 - [ ] **Data and Content Enhancements:**
   - [ ] Relative Path Links (full support for `../` and `./` links)
   - [ ] URL/External Links (identify and open external URLs)
-  - [ ] Syntax Highlighting (for code files in preview)
+  - [x] Syntax Highlighting (for code files in preview)
   - [x] Markdown Rendering (render Markdown content in preview)
   - [ ] PDF/Document Preview (snippets or basic rendering)
   - [ ] Tag Cloud/List with frequency
