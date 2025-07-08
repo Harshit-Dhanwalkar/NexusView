@@ -43,10 +43,46 @@ pub struct FileGraphApp {
     // show_orphans: bool,
     graph_rect: egui::Rect,
     markdown_cache: egui_commonmark::CommonMarkCache,
+    scan_progress: f32,
+    scan_status: String,
+    graph_build_progress: f32,
+    graph_build_status: String,
+    scan_progress_receiver: Option<std::sync::mpsc::Receiver<(f32, String)>>,
 }
 
 impl App for FileGraphApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Check for scan progress updates
+        if let Some(receiver) = self.scan_progress_receiver.take() {
+            while let Ok((progress, status)) = receiver.try_recv() {
+                self.scan_progress = progress;
+                self.scan_status = status;
+                if progress >= 1.0 {
+                    self.is_scanning = false;
+                }
+                ctx.request_repaint();
+            }
+            if self.is_scanning {
+                self.scan_progress_receiver = Some(receiver);
+            }
+        }
+
+        // Update graph building progress
+        {
+            let scanner_locked = self.scanner.lock().unwrap();
+
+            self.graph_build_progress = 0.0;
+            self.graph_build_status = "Building file graph...".to_string();
+            ctx.request_repaint();
+            self.file_graph.build_from_scanner(&scanner_locked);
+            self.graph_build_progress = 0.5;
+            self.graph_build_status = "Building tag graph...".to_string();
+            ctx.request_repaint();
+            self.tag_graph.build_from_tags(&scanner_locked);
+            self.graph_build_progress = 1.0;
+            self.graph_build_status = "Graph ready".to_string();
+        }
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Scanning directory:");
@@ -85,23 +121,31 @@ impl App for FileGraphApp {
 
                 if ui.button("Rescan Directory").clicked() && !self.is_scanning {
                     self.is_scanning = true;
-                    self.scan_error = None;
-                    self.selected_node = None;
-                    self.selected_file_content = None;
-                    self.selected_image = None;
+                    self.scan_progress = 0.0;
+                    self.scan_status = "Starting scan...".to_string();
 
                     let scanner_arc_clone = self.scanner.clone();
                     let scan_dir_clone = self.scan_dir.clone();
+                    let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
+
                     thread::spawn(move || {
                         let mut scanner = scanner_arc_clone.lock().unwrap();
-                        if let Err(e) = scanner.scan_directory(&scan_dir_clone) {
+                        if let Err(e) =
+                            scanner.scan_directory_with_progress(&scan_dir_clone, progress_sender)
+                        {
                             eprintln!("Error during scan: {}", e);
                         }
                     });
+
+                    self.scan_progress_receiver = Some(progress_receiver);
                 }
 
                 if self.is_scanning {
-                    ui.label("Scanning...");
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add(egui::ProgressBar::new(self.scan_progress).show_percentage());
+                        ui.label(&self.scan_status);
+                    });
                 }
 
                 if let Some(ref err) = self.scan_error {
@@ -185,6 +229,21 @@ impl App for FileGraphApp {
                 egui::Rect::from_center_size(egui::Pos2::ZERO, graph_rect.size()),
                 graph_rect,
             );
+
+            if self.graph_build_progress < 1.0 {
+                ui.with_layout(
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add(
+                                egui::ProgressBar::new(self.graph_build_progress).show_percentage(),
+                            );
+                            ui.label(&self.graph_build_status);
+                        });
+                    },
+                );
+            }
 
             if response.hovered() {
                 self.graph_zoom_factor *= ctx.input(|i| i.zoom_delta());
@@ -614,7 +673,8 @@ impl FileGraphApp {
         let current_directory_label = format!("{}", current_dir.display());
 
         let mut scanner = FileScanner::new(&current_dir);
-        if let Err(e) = scanner.scan_directory(&current_dir) {
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        if let Err(e) = scanner.scan_directory_with_progress(&current_dir, sender) {
             eprintln!("Initial scan error: {}", e);
         }
 
@@ -691,6 +751,11 @@ impl FileGraphApp {
             // show_orphans: true,
             graph_rect: egui::Rect::NOTHING,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
+            scan_progress: 0.0,
+            scan_status: String::new(),
+            graph_build_progress: 0.0,
+            graph_build_status: String::new(),
+            scan_progress_receiver: None,
         }
     }
 }

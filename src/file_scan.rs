@@ -3,6 +3,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 
 pub struct FileScanner {
     root_path: PathBuf,
@@ -21,7 +22,11 @@ impl FileScanner {
         }
     }
 
-    pub fn scan_directory(&mut self, path: &Path) -> Result<(), String> {
+    pub fn scan_directory_with_progress(
+        &mut self,
+        path: &Path,
+        progress_sender: Sender<(f32, String)>,
+    ) -> Result<(), String> {
         if !path.is_dir() {
             return Err(format!("Path is not a directory: {:?}", path));
         }
@@ -30,8 +35,23 @@ impl FileScanner {
         self.tags.clear();
         self.images.clear();
 
-        self.traverse_directory(path)?;
+        let entries: Vec<_> = fs::read_dir(path)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+            .collect();
 
+        let total = entries.len();
+        for (i, entry) in entries.into_iter().enumerate() {
+            let path = entry.path();
+            let progress = (i as f32) / (total as f32);
+            progress_sender
+                .send((progress, format!("Scanning: {}", path.display())))
+                .map_err(|e| e.to_string())?;
+
+            self.process_file(&path)?;
+        }
+
+        // Resolve links after scanning
         let mut resolved_files = HashMap::new();
         for (file_path, links) in &self.files {
             let mut resolved_links_for_file = Vec::new();
@@ -47,49 +67,43 @@ impl FileScanner {
         }
         self.files = resolved_files;
 
+        progress_sender
+            .send((1.0, "Scan complete".to_string()))
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    fn traverse_directory(&mut self, path: &Path) -> Result<(), String> {
-        let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ind"];
-        let tag_re = Regex::new(r"#(\w+)").unwrap();
-        let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+)\)|\[\[([^\]]+)\]\]").unwrap();
+    fn process_file(&mut self, path: &Path) -> Result<(), String> {
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let ext_lower = ext.to_lowercase();
+                let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ind"];
 
-        let entries = fs::read_dir(path).map_err(|e| e.to_string())?;
+                if image_extensions.contains(&ext_lower.as_str()) {
+                    self.files.insert(path.to_path_buf(), Vec::new());
+                    self.images.push(path.to_path_buf());
+                } else if let Ok(content) = fs::read_to_string(path) {
+                    let mut links = Vec::new();
+                    let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+)\)|\[\[([^\]]+)\]\]").unwrap();
 
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    let ext_lower = ext.to_lowercase();
-
-                    if image_extensions.contains(&ext_lower.as_str()) {
-                        self.files.insert(path.clone(), Vec::new());
-                        self.images.push(path.clone());
-                    } else if let Ok(content) = fs::read_to_string(&path) {
-                        let mut links = Vec::new();
-                        for cap in link_re.captures_iter(&content) {
-                            if let Some(link) = cap.get(2) {
-                                // Markdown [text](link)
-                                links.push(PathBuf::from(link.as_str()));
-                            } else if let Some(link) = cap.get(3) {
-                                // Wiki [[link]]
-                                links.push(PathBuf::from(link.as_str()));
-                            }
+                    for cap in link_re.captures_iter(&content) {
+                        if let Some(link) = cap.get(2) {
+                            links.push(PathBuf::from(link.as_str()));
+                        } else if let Some(link) = cap.get(3) {
+                            links.push(PathBuf::from(link.as_str()));
                         }
+                    }
 
-                        self.files.insert(path.clone(), links);
+                    self.files.insert(path.to_path_buf(), links);
 
-                        let tags: Vec<_> = tag_re
-                            .captures_iter(&content)
-                            .filter_map(|c| c.get(1))
-                            .map(|m| m.as_str().to_string())
-                            .collect();
-                        if !tags.is_empty() {
-                            self.tags.insert(path.clone(), tags);
-                        }
+                    let tag_re = Regex::new(r"#(\w+)").unwrap();
+                    let tags: Vec<_> = tag_re
+                        .captures_iter(&content)
+                        .filter_map(|c| c.get(1))
+                        .map(|m| m.as_str().to_string())
+                        .collect();
+                    if !tags.is_empty() {
+                        self.tags.insert(path.to_path_buf(), tags);
                     }
                 }
             }

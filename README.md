@@ -54,7 +54,7 @@ cargo run --release -- /path/to/your/directory
   - [ ] Relative Path Links (full support for `../` and `./` links)
   - [ ] URL/External Links (identify and open external URLs)
   - [ ] Syntax Highlighting (for code files in preview)
-  - [ ] Markdown Rendering (render Markdown content in preview)
+  - [x] Markdown Rendering (render Markdown content in preview)
   - [ ] PDF/Document Preview (snippets or basic rendering)
   - [ ] Tag Cloud/List with frequency
 - [ ] **Configuration and Persistence:**
@@ -62,7 +62,7 @@ cargo run --release -- /path/to/your/directory
   - [ ] Persistent Settings (save app settings between sessions)
   - [ ] Config File (for custom settings)
 - [ ] **Usability and Polish:**
-  - [ ] Progress Indicators (for scanning and graph building)
+  - [x] Progress Indicators (for scanning and graph building)
   - [ ] Improved Error Handling & Messaging
   - [ ] Context Menus (right-click actions on nodes/files)
   - [ ] Drag and Drop (files into app, or nodes for re-linking)
