@@ -121,7 +121,6 @@ pub struct FileGraphApp {
     last_drag_pos: Option<egui::Pos2>,
     current_directory_label: String,
     show_images: bool,
-    // show_orphans: bool,
     show_hidden_files: bool,
     markdown_cache: egui_commonmark::CommonMarkCache,
     scan_progress: f32,
@@ -193,21 +192,6 @@ impl App for FileGraphApp {
             });
             ui.separator();
 
-            // FIX: use uincode icons (file icon has issue)
-            // ui.horizontal(|ui| {
-            //     // Directory panel toggle button
-            //     if ui.button("🗀").clicked() {
-            //         self.show_directory_panel = !self.show_directory_panel;
-            //     }
-            //     // Content panel toggle button
-            //     if ui.button("🗎").clicked() {
-            //         self.show_content_panel = !self.show_content_panel;
-            //     }
-            //     // Physics menu toggle button
-            //     if ui.button("⚙").clicked() {
-            //         self.show_physics_menu = !self.show_physics_menu;
-            //     }
-            // });
             ui.horizontal(|ui| {
                 // Directory panel toggle button
                 if ui.button("📁").clicked() {
@@ -244,7 +228,6 @@ impl App for FileGraphApp {
                 }
 
                 ui.checkbox(&mut self.show_full_paths, "Show Full Paths");
-                // ui.checkbox(&mut self.show_orphans, "Show Orphans");
                 ui.checkbox(&mut self.show_images, "Show Images");
 
                 if ui
@@ -614,6 +597,11 @@ impl App for FileGraphApp {
                         self.physics_simulator.update(&edges_to_draw);
                     }
 
+                    // Animation effects
+                    let time = ctx.input(|i| i.time) as f32;
+                    let global_pulse = (time * 2.0).sin() * 0.02 + 1.0;
+
+                    // Draw edges with enhanced styling
                     for (start_node_idx, end_node_idx) in &edges_to_draw {
                         if let (Some(&start_pos), Some(&end_pos)) = (
                             self.physics_simulator.get_node_position(*start_node_idx),
@@ -628,25 +616,52 @@ impl App for FileGraphApp {
                                 end_pos.y * self.graph_zoom_factor + self.graph_center_offset.y,
                             ));
 
-                            let stroke = Stroke::new(1.0, Color32::GRAY);
-                            painter.line_segment([start_screen_pos, end_screen_pos], stroke);
-
                             let vec_between = end_screen_pos - start_screen_pos;
-                            let end_point_for_arrow = start_screen_pos + vec_between * 0.9;
-
                             let dir = vec_between.normalized();
-                            let arrow_size = 8.0;
 
-                            let arrow_tip1 =
-                                end_point_for_arrow - rotate_vec2(dir, 0.5) * arrow_size;
-                            let arrow_tip2 =
-                                end_point_for_arrow - rotate_vec2(dir, -0.5) * arrow_size;
+                            // Enhanced edge drawing with glow effect
+                            let edge_stroke = Stroke::new(
+                                1.5 * self.graph_zoom_factor,
+                                Color32::from_rgba_premultiplied(100, 100, 255, 150),
+                            );
 
-                            painter.line_segment([end_point_for_arrow, arrow_tip1], stroke);
-                            painter.line_segment([end_point_for_arrow, arrow_tip2], stroke);
+                            // Draw the edge with glow effect
+                            for i in 0..3 {
+                                let width = edge_stroke.width - i as f32 * 0.5;
+                                let alpha = (150 - i * 50) as f32;
+                                let glow_stroke = Stroke::new(
+                                    width,
+                                    Color32::from_rgba_premultiplied(100, 100, 255, alpha as u8),
+                                );
+                                painter
+                                    .line_segment([start_screen_pos, end_screen_pos], glow_stroke);
+                            }
+
+                            // Draw the main edge
+                            painter.line_segment([start_screen_pos, end_screen_pos], edge_stroke);
+
+                            // Arrow with glow
+                            let arrow_size = 10.0 * self.graph_zoom_factor;
+                            let arrow_tip1 = end_screen_pos - rotate_vec2(dir, 0.5) * arrow_size;
+                            let arrow_tip2 = end_screen_pos - rotate_vec2(dir, -0.5) * arrow_size;
+
+                            for i in 0..3 {
+                                let width = edge_stroke.width - i as f32 * 0.5;
+                                let alpha = (150 - i * 50) as f32;
+                                let glow_stroke = Stroke::new(
+                                    width,
+                                    Color32::from_rgba_premultiplied(100, 100, 255, alpha as u8),
+                                );
+                                painter.line_segment([end_screen_pos, arrow_tip1], glow_stroke);
+                                painter.line_segment([end_screen_pos, arrow_tip2], glow_stroke);
+                            }
+
+                            painter.line_segment([end_screen_pos, arrow_tip1], edge_stroke);
+                            painter.line_segment([end_screen_pos, arrow_tip2], edge_stroke);
                         }
                     }
 
+                    // Draw nodes with enhanced styling
                     for &node_idx in &nodes_to_draw {
                         if let Some(node_pos_vec2) =
                             self.physics_simulator.get_node_position(node_idx).cloned()
@@ -669,7 +684,8 @@ impl App for FileGraphApp {
                                 },
                             };
 
-                            let node_radius = 15.0 * self.graph_zoom_factor;
+                            // Enhanced node styling parameters
+                            let node_radius = 15.0 * self.graph_zoom_factor * global_pulse;
                             let node_color = if Some(node_idx) == self.selected_node {
                                 Color32::from_rgb(255, 100, 100)
                             } else if self.search_results.contains(&node_idx) {
@@ -679,74 +695,130 @@ impl App for FileGraphApp {
                                     GraphMode::Links => match &self.file_graph.graph[node_idx] {
                                         GraphNode::File(path) => {
                                             let path = Path::new(path);
-                                            let is_image = path
-                                                .extension()
-                                                .map(|ext| {
-                                                    let ext = ext.to_string_lossy().to_lowercase();
-                                                    [
-                                                        "png", "jpg", "jpeg", "gif", "bmp", "webp",
-                                                        "ind",
-                                                    ]
-                                                    .contains(&ext.as_str())
-                                                })
-                                                .unwrap_or(false);
+                                            let is_image = is_image_path(path);
                                             if is_image {
-                                                Color32::from_rgb(255, 165, 0)
+                                                Color32::from_rgb(255, 165, 0) // Orange for images
+                                            } else if is_markdown_path(path) {
+                                                Color32::from_rgb(100, 200, 255) // Blue for markdown
+                                            } else if is_code_path(path) {
+                                                Color32::from_rgb(150, 100, 255) // Purple for code
                                             } else {
-                                                Color32::BLUE
+                                                Color32::from_rgb(100, 200, 150) // Teal for other files
                                             }
                                         }
-                                        GraphNode::Tag(_) => Color32::GREEN,
+                                        GraphNode::Tag(_) => Color32::from_rgb(255, 100, 150), // Pink for tags
                                     },
                                     GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
                                         GraphNode::File(path) => {
                                             let scanner_locked = self.scanner.lock().unwrap();
                                             let has_tags =
                                                 scanner_locked.tags.contains_key(Path::new(path));
-                                            let is_image = Path::new(path)
-                                                .extension()
-                                                .map(|ext| {
-                                                    let ext = ext.to_string_lossy().to_lowercase();
-                                                    ["png", "jpg", "jpeg", "gif", "bmp", "webp"]
-                                                        .contains(&ext.as_str())
-                                                })
-                                                .unwrap_or(false);
+                                            let is_image = is_image_path(Path::new(path));
                                             if is_image {
-                                                Color32::from_rgb(255, 165, 0)
+                                                Color32::from_rgb(255, 165, 0) // Orange for images
                                             } else if has_tags {
-                                                Color32::BLUE
+                                                Color32::from_rgb(100, 200, 255) // Blue for tagged files
                                             } else {
-                                                Color32::GRAY
+                                                Color32::from_rgb(100, 100, 100) // Gray for untagged files
                                             }
                                         }
-                                        GraphNode::Tag(_) => Color32::GREEN,
+                                        GraphNode::Tag(_) => Color32::from_rgb(255, 100, 150), // Pink for tags
                                     },
                                 }
                             };
 
+                            // Custom node styling parameters
+                            let node_glow_radius = 10.0 * self.graph_zoom_factor;
+                            let node_shadow_offset = vec2(2.0, 2.0) * self.graph_zoom_factor;
+
                             // Pulse effect for selected node
                             let pulse = if Some(node_idx) == self.selected_node {
-                                ctx.input(|i| i.time as f32).sin().abs() * 0.2 + 0.8
+                                (time as f32).sin().abs() * 0.2 + 0.8
                             } else {
                                 1.0
                             };
-                            painter.circle_filled(screen_pos, node_radius * pulse, node_color);
 
+                            // Draw the node with effects
+                            if Some(node_idx) == self.selected_node {
+                                // Glow effect for selected node
+                                for i in 0..5 {
+                                    let radius = node_radius * pulse + i as f32 * 2.0;
+                                    let alpha = (50 - i * 10) as f32 / 255.0;
+                                    let glow_color = Color32::from_rgba_premultiplied(
+                                        node_color.r(),
+                                        node_color.g(),
+                                        node_color.b(),
+                                        (alpha * 255.0) as u8,
+                                    );
+                                    painter.circle_stroke(
+                                        screen_pos,
+                                        radius,
+                                        Stroke::new(2.0, glow_color),
+                                    );
+                                }
+                            }
+
+                            // Node shadow
+                            painter.circle_filled(
+                                screen_pos + node_shadow_offset,
+                                node_radius,
+                                Color32::from_black_alpha(50),
+                            );
+
+                            // Main node circle
+                            painter.circle_filled(screen_pos, node_radius, node_color);
+
+                            // Node border
+                            let border_color = if Some(node_idx) == self.selected_node {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_gray(100)
+                            };
+                            painter.circle_stroke(
+                                screen_pos,
+                                node_radius,
+                                Stroke::new(1.5, border_color),
+                            );
+
+                            // Node label with improved styling
                             let display_name = if self.show_full_paths {
                                 node_name.clone()
                             } else {
-                                PathBuf::from(&node_name).file_name().map_or_else(
-                                    || node_name.clone(),
-                                    |os_str| os_str.to_string_lossy().into_owned(),
-                                )
+                                PathBuf::from(&node_name)
+                                    .file_name()
+                                    .and_then(|os_str| os_str.to_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| node_name.clone())
                             };
 
                             let font_id = egui::TextStyle::Body.resolve(ui.style());
-                            let text_galley = ui
-                                .fonts(|f| f.layout_no_wrap(display_name, font_id, Color32::WHITE));
-                            let text_pos =
-                                screen_pos + vec2(-text_galley.size().x / 2.0, node_radius + 5.0);
-                            painter.galley(text_pos, text_galley.clone(), Color32::WHITE);
+                            let text_color = {
+                                let r = node_color.r() as f32 / 255.0;
+                                let g = node_color.g() as f32 / 255.0;
+                                let b = node_color.b() as f32 / 255.0;
+                                let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                                if luminance > 0.5 {
+                                    Color32::BLACK
+                                } else {
+                                    Color32::WHITE
+                                }
+                            };
+
+                            let text_galley =
+                                ui.fonts(|f| f.layout_no_wrap(display_name, font_id, text_color));
+
+                            // Text background for better readability
+                            let text_bg_rect = egui::Rect::from_center_size(
+                                screen_pos
+                                    + vec2(0.0, node_radius + 5.0 + text_galley.size().y / 2.0),
+                                text_galley.size() + vec2(8.0, 4.0),
+                            );
+                            painter.rect_filled(text_bg_rect, 4.0, Color32::from_black_alpha(200));
+                            painter.galley(
+                                text_bg_rect.center() - text_galley.size() / 2.0,
+                                text_galley.clone(),
+                                text_color,
+                            );
 
                             let node_rect = if text_galley.size().y > 0.0 {
                                 egui::Rect::from_center_size(
@@ -780,8 +852,26 @@ impl App for FileGraphApp {
                                 self.last_drag_pos = None;
                             }
 
-                            // Hover effect for absolute path
+                            // Enhanced hover effects
                             if node_response.hovered() {
+                                // Glow effect on hover
+                                for i in 0..3 {
+                                    let radius = node_radius + i as f32 * 3.0;
+                                    let alpha = (100 - i * 30) as f32;
+                                    let hover_color = Color32::from_rgba_premultiplied(
+                                        node_color.r(),
+                                        node_color.g(),
+                                        node_color.b(),
+                                        alpha as u8,
+                                    );
+                                    painter.circle_stroke(
+                                        screen_pos,
+                                        radius,
+                                        Stroke::new(2.0, hover_color),
+                                    );
+                                }
+
+                                // Show tooltip with additional information
                                 let full_name = match self.current_graph_mode {
                                     GraphMode::Links => match &self.file_graph.graph[node_idx] {
                                         GraphNode::File(file_path_str) => file_path_str.clone(),
@@ -792,6 +882,29 @@ impl App for FileGraphApp {
                                         GraphNode::Tag(tag_name) => format!("#{}", tag_name),
                                     },
                                 };
+
+                                let tooltip_content = match self.current_graph_mode {
+                                    GraphMode::Links => {
+                                        if let GraphNode::File(path) =
+                                            &self.file_graph.graph[node_idx]
+                                        {
+                                            let file_type = if is_image_path(Path::new(path)) {
+                                                "Image"
+                                            } else if is_markdown_path(Path::new(path)) {
+                                                "Markdown"
+                                            } else if is_code_path(Path::new(path)) {
+                                                "Code"
+                                            } else {
+                                                "File"
+                                            };
+                                            format!("{}: {}", file_type, full_name)
+                                        } else {
+                                            full_name
+                                        }
+                                    }
+                                    GraphMode::Tags => full_name,
+                                };
+
                                 egui::show_tooltip_at(
                                     ctx,
                                     egui::LayerId::new(
@@ -801,7 +914,20 @@ impl App for FileGraphApp {
                                     egui::Id::new("node_tooltip"),
                                     node_response.hover_pos().unwrap(),
                                     |ui| {
-                                        ui.label(full_name);
+                                        ui.label(egui::RichText::new(tooltip_content).strong());
+                                        if let GraphNode::File(path) =
+                                            &self.file_graph.graph[node_idx]
+                                        {
+                                            if let Ok(metadata) = std::fs::metadata(path) {
+                                                let modified =
+                                                    metadata.modified().unwrap_or_else(|_| {
+                                                        std::time::SystemTime::UNIX_EPOCH
+                                                    });
+                                                let size = metadata.len();
+                                                ui.label(format!("Size: {} bytes", size));
+                                                ui.label(format!("Modified: {:?}", modified));
+                                            }
+                                        }
                                     },
                                 );
                             }
@@ -835,118 +961,111 @@ impl App for FileGraphApp {
                                 self.right_click_menu_pos = node_response.hover_pos();
                                 self.menu_open = true;
                             }
-                            // Render the custom right-click menu as an egui::Window
-                            if let Some(menu_node_idx) = self.open_menu_on_node {
-                                if let Some(menu_pos) = self.right_click_menu_pos {
-                                    // Use the stored mouse position
-                                    let mut should_close_menu = false;
+                        }
+                    }
 
-                                    let window_response = egui::Window::new("Node Actions")
-                                        .id(egui::Id::new("right_click_node_menu")
-                                            .with(menu_node_idx))
-                                        .default_pos(menu_pos)
-                                        .collapsible(false)
-                                        .resizable(false)
-                                        .default_width(200.0)
-                                        .show(ctx, |ui| {
-                                            let full_name_for_menu = match self.current_graph_mode {
-                                                GraphMode::Links => {
-                                                    match &self.file_graph.graph[menu_node_idx] {
-                                                        GraphNode::File(file_path_str) => {
-                                                            file_path_str.clone()
-                                                        }
-                                                        GraphNode::Tag(tag_name) => {
-                                                            format!("Tag: #{}", tag_name)
-                                                        }
-                                                    }
-                                                }
-                                                GraphMode::Tags => {
-                                                    match &self.tag_graph.graph[menu_node_idx] {
-                                                        GraphNode::File(file_path_str) => {
-                                                            file_path_str.clone()
-                                                        }
-                                                        GraphNode::Tag(tag_name) => {
-                                                            format!("Tag: #{}", tag_name)
-                                                        }
-                                                    }
-                                                }
-                                            };
-                                            ui.label(full_name_for_menu);
-                                            ui.separator();
+                    // Render the custom right-click menu as an egui::Window
+                    if let Some(menu_node_idx) = self.open_menu_on_node {
+                        if let Some(menu_pos) = self.right_click_menu_pos {
+                            // Use the stored mouse position
+                            let mut should_close_menu = false;
 
-                                            let path_buf_option = match self.current_graph_mode {
-                                                GraphMode::Links => match &self.file_graph.graph
-                                                    [menu_node_idx]
-                                                {
-                                                    GraphNode::File(s) => Some(PathBuf::from(s)),
-                                                    GraphNode::Tag(_) => None,
-                                                },
-                                                GraphMode::Tags => match &self.tag_graph.graph
-                                                    [menu_node_idx]
-                                                {
-                                                    GraphNode::File(s) => Some(PathBuf::from(s)),
-                                                    GraphNode::Tag(_) => None,
-                                                },
-                                            };
-
-                                            if let Some(path_buf) = path_buf_option {
-                                                if path_buf.is_file() {
-                                                    if ui.button("Open File").clicked() {
-                                                        #[cfg(target_os = "linux")]
-                                                        {
-                                                            std::process::Command::new("xdg-open")
-                                                                .arg(&path_buf)
-                                                                .spawn()
-                                                                .expect("Failed to open file");
-                                                        }
-                                                        #[cfg(target_os = "macos")]
-                                                        {
-                                                            std::process::Command::new("open")
-                                                                .arg(&path_buf)
-                                                                .spawn()
-                                                                .expect("Failed to open file");
-                                                        }
-                                                        #[cfg(target_os = "windows")]
-                                                        {
-                                                            std::process::Command::new("cmd")
-                                                                .arg("/C")
-                                                                .arg("start")
-                                                                .arg(&path_buf)
-                                                                .spawn()
-                                                                .expect("Failed to open file");
-                                                        }
-                                                        should_close_menu = true;
-                                                    }
-                                                    if ui.button("Copy Path").clicked() {
-                                                        ctx.copy_text(
-                                                            path_buf.to_string_lossy().to_string(),
-                                                        );
-                                                        should_close_menu = true;
-                                                    }
-                                                }
+                            let window_response = egui::Window::new("Node Actions")
+                                .id(egui::Id::new("right_click_node_menu").with(menu_node_idx))
+                                .default_pos(menu_pos)
+                                .collapsible(false)
+                                .resizable(false)
+                                .default_width(200.0)
+                                .show(ctx, |ui| {
+                                    let full_name_for_menu = match self.current_graph_mode {
+                                        GraphMode::Links => match &self.file_graph.graph
+                                            [menu_node_idx]
+                                        {
+                                            GraphNode::File(file_path_str) => file_path_str.clone(),
+                                            GraphNode::Tag(tag_name) => {
+                                                format!("Tag: #{}", tag_name)
                                             }
-                                        });
+                                        },
+                                        GraphMode::Tags => match &self.tag_graph.graph
+                                            [menu_node_idx]
+                                        {
+                                            GraphNode::File(file_path_str) => file_path_str.clone(),
+                                            GraphNode::Tag(tag_name) => {
+                                                format!("Tag: #{}", tag_name)
+                                            }
+                                        },
+                                    };
+                                    ui.label(full_name_for_menu);
+                                    ui.separator();
 
-                                    // Check the window's response to see if it was closed
-                                    if window_response.is_none()
-                                        || (window_response.is_some()
-                                            && window_response
-                                                .unwrap()
-                                                .response
-                                                .clicked_elsewhere())
-                                        || should_close_menu
-                                    {
-                                        self.open_menu_on_node = None;
-                                        self.right_click_menu_pos = None;
-                                        self.menu_open = false;
-                                    } else {
-                                        self.menu_open = true;
+                                    let path_buf_option = match self.current_graph_mode {
+                                        GraphMode::Links => {
+                                            match &self.file_graph.graph[menu_node_idx] {
+                                                GraphNode::File(s) => Some(PathBuf::from(s)),
+                                                GraphNode::Tag(_) => None,
+                                            }
+                                        }
+                                        GraphMode::Tags => {
+                                            match &self.tag_graph.graph[menu_node_idx] {
+                                                GraphNode::File(s) => Some(PathBuf::from(s)),
+                                                GraphNode::Tag(_) => None,
+                                            }
+                                        }
+                                    };
+
+                                    if let Some(path_buf) = path_buf_option {
+                                        if path_buf.is_file() {
+                                            if ui.button("Open File").clicked() {
+                                                #[cfg(target_os = "linux")]
+                                                {
+                                                    std::process::Command::new("xdg-open")
+                                                        .arg(&path_buf)
+                                                        .spawn()
+                                                        .expect("Failed to open file");
+                                                }
+                                                #[cfg(target_os = "macos")]
+                                                {
+                                                    std::process::Command::new("open")
+                                                        .arg(&path_buf)
+                                                        .spawn()
+                                                        .expect("Failed to open file");
+                                                }
+                                                #[cfg(target_os = "windows")]
+                                                {
+                                                    std::process::Command::new("cmd")
+                                                        .arg("/C")
+                                                        .arg("start")
+                                                        .arg(&path_buf)
+                                                        .spawn()
+                                                        .expect("Failed to open file");
+                                                }
+                                                should_close_menu = true;
+                                            }
+                                            if ui.button("Copy Path").clicked() {
+                                                ctx.copy_text(
+                                                    path_buf.to_string_lossy().to_string(),
+                                                );
+                                                should_close_menu = true;
+                                            }
+                                        }
                                     }
-                                }
-                            } else {
+                                });
+
+                            // Check the window's response to see if it was closed
+                            if window_response.is_none()
+                                || (window_response.is_some()
+                                    && window_response.unwrap().response.clicked_elsewhere())
+                                || should_close_menu
+                            {
+                                self.open_menu_on_node = None;
+                                self.right_click_menu_pos = None;
                                 self.menu_open = false;
+                            } else {
+                                self.menu_open = true;
                             }
                         }
+                    } else {
+                        self.menu_open = false;
                     }
                 });
 
@@ -1012,6 +1131,8 @@ impl App for FileGraphApp {
             });
     }
 }
+
+// ... [rest of the implementation remains the same as before]
 
 impl FileGraphApp {
     pub fn new(scan_dir: PathBuf) -> Self {
@@ -1095,46 +1216,42 @@ impl FileGraphApp {
         self.current_scan_dir = path_to_scan.clone();
         self.scan_error = None;
 
-        // Clear graphs before scanning
-        self.file_graph.graph.clear();
-        self.tag_graph.graph.clear();
+        // Clear old physics data
         self.physics_simulator.node_positions.clear();
         self.physics_simulator.node_velocities.clear();
         self.initial_node_layout.clear();
 
-        let scanner_clone = self.scanner.clone();
-        let sender_clone = self
-            .scan_sender
-            .clone()
-            .expect("Scan sender not initialized");
+        let scanner_arc_clone = self.scanner.clone(); // Correct variable name
+        let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
+        self.scan_sender = Some(progress_sender.clone());
+        self.scan_progress_receiver = Some(progress_receiver);
+
         let ctx_clone = ctx.clone();
         let show_hidden_clone = self.show_hidden_files;
 
         thread::spawn(move || {
             let scan_start_time = Instant::now();
-            if let Ok(mut scanner_guard) = scanner_clone.lock() {
+            if let Ok(mut scanner_guard) = scanner_arc_clone.lock() {
+                // Use scanner_arc_clone here
                 scanner_guard.set_show_hidden(show_hidden_clone);
-                // Use the provided path_to_scan instead of any other path
-                let scan_result =
-                    scanner_guard.scan_directory_with_progress(&path_to_scan, sender_clone.clone());
+                let scan_result = scanner_guard
+                    .scan_directory_with_progress(&path_to_scan, progress_sender.clone());
                 drop(scanner_guard);
 
                 match scan_result {
                     Ok(_) => {
                         println!("Scan completed in {:?}", scan_start_time.elapsed());
-                        // Trigger graph rebuild after scan
                         ctx_clone.request_repaint();
                     }
                     Err(e) => {
                         eprintln!("Scan error: {}", e);
-                        let _ = sender_clone.send((1.0, format!("Error: {}", e)));
-                        // Send error back to UI
+                        let _ = progress_sender.send((1.0, format!("Error: {}", e)));
                         ctx_clone.request_repaint();
                     }
                 }
             } else {
-                let _ =
-                    sender_clone.send((1.0, "Error: Could not lock scanner for scan.".to_string()));
+                let _ = progress_sender
+                    .send((1.0, "Error: Could not lock scanner for scan.".to_string()));
                 ctx_clone.request_repaint();
             }
         });
