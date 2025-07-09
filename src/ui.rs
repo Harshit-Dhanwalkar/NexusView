@@ -496,10 +496,10 @@ impl App for FileGraphApp {
 
                     for node_idx in &nodes_to_draw {
                         if !self.physics_simulator.node_positions.contains_key(node_idx) {
-                            let mut rng = rand::thread_rng(); // Corrected: use thread_rng
+                            let mut rng = rand::thread_rng();
                             let random_pos = egui::vec2(
-                                rng.gen_range(-100.0..100.0), // Corrected: use gen_range
-                                rng.gen_range(-100.0..100.0), // Corrected: use gen_range
+                                rng.gen_range(-100.0..100.0),
+                                rng.gen_range(-100.0..100.0),
                             );
                             self.physics_simulator
                                 .node_positions
@@ -633,6 +633,7 @@ impl App for FileGraphApp {
                                     },
                                 }
                             };
+
                             // Pulse effect for selected node
                             let pulse = if Some(node_idx) == self.selected_node {
                                 ctx.input(|i| i.time as f32).sin().abs() * 0.2 + 0.8
@@ -872,6 +873,29 @@ impl App for FileGraphApp {
                 });
                 ui.separator();
 
+                // Display file name
+                if let Some(node_idx) = self.selected_node {
+                    let file_name = match self.current_graph_mode {
+                        GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                            GraphNode::File(s) => PathBuf::from(s).file_name().map_or_else(
+                                || s.clone(),
+                                |os_str| os_str.to_string_lossy().into_owned(),
+                            ),
+                            GraphNode::Tag(s) => format!("#{}", s),
+                        },
+                        GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                            GraphNode::File(s) => PathBuf::from(s).file_name().map_or_else(
+                                || s.clone(),
+                                |os_str| os_str.to_string_lossy().into_owned(),
+                            ),
+                            GraphNode::Tag(s) => format!("#{}", s),
+                        },
+                    };
+
+                    ui.label(egui::RichText::new(file_name).strong());
+                    ui.separator();
+                }
+
                 if let Some(content) = &self.selected_file_content {
                     if self.is_markdown_file() {
                         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -887,6 +911,10 @@ impl App for FileGraphApp {
                     }
                 } else if let Some(image) = &self.selected_image {
                     egui::ScrollArea::vertical().show(ui, |ui| {
+                        // Show image dimensions
+                        let size = image.size_vec2();
+                        ui.label(format!("Dimensions: {} × {} px", size.x, size.y));
+                        ui.add_space(10.0);
                         ui.image(image);
                     });
                 } else {
