@@ -136,11 +136,23 @@ impl App for FileGraphApp {
             self.graph_build_progress = 0.0;
             self.graph_build_status = "Building file graph...".to_string();
             ctx.request_repaint();
+
+            // Clear old graphs before rebuilding
+            self.file_graph.graph.clear();
+            self.file_graph.node_indices.clear();
             self.file_graph.build_from_scanner(&scanner_locked);
+
             self.graph_build_progress = 0.5;
             self.graph_build_status = "Building tag graph...".to_string();
             ctx.request_repaint();
+
+            // Clear old tag graph before rebuilding
+            self.tag_graph.graph.clear();
+            self.tag_graph.file_node_indices.clear();
+            self.tag_graph.tag_node_indices.clear();
+            self.tag_graph.image_node_indices.clear();
             self.tag_graph.build_from_tags(&scanner_locked);
+
             self.graph_build_progress = 1.0;
             self.graph_build_status = "Graph ready".to_string();
         }
@@ -494,12 +506,22 @@ impl App for FileGraphApp {
                         }
                     };
 
+                    // Clear any old nodes from physics simulator that aren't in current graph
+                    self.physics_simulator
+                        .node_positions
+                        .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+                    self.physics_simulator
+                        .node_velocities
+                        .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+                    self.initial_node_layout
+                        .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+
                     for node_idx in &nodes_to_draw {
                         if !self.physics_simulator.node_positions.contains_key(node_idx) {
-                            let mut rng = rand::thread_rng();
+                            let mut rng = rand::rng();
                             let random_pos = egui::vec2(
-                                rng.gen_range(-100.0..100.0),
-                                rng.gen_range(-100.0..100.0),
+                                rng.random_range(-100.0..100.0),
+                                rng.random_range(-100.0..100.0),
                             );
                             self.physics_simulator
                                 .node_positions
@@ -854,7 +876,6 @@ impl App for FileGraphApp {
                                     }
                                 }
                             } else {
-                                // If open_menu_on_node is None, ensure menu_open is also false
                                 self.menu_open = false;
                             }
                         }
@@ -985,11 +1006,21 @@ impl FileGraphApp {
             self.scan_progress = 0.0;
             self.scan_status = "Starting scan...".to_string();
 
+            // Clear old physics data
+            self.physics_simulator.node_positions.clear();
+            self.physics_simulator.node_velocities.clear();
+            self.initial_node_layout.clear();
+
             let scanner_arc_clone = self.scanner.clone();
             let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
 
             thread::spawn(move || {
                 let mut scanner = scanner_arc_clone.lock().unwrap();
+                // Clear previous results before scanning new directories
+                scanner.files.clear();
+                scanner.tags.clear();
+                scanner.images.clear();
+
                 for path in selected_paths {
                     if let Err(e) =
                         scanner.scan_directory_with_progress(&path, progress_sender.clone())
@@ -1001,7 +1032,20 @@ impl FileGraphApp {
 
             self.scan_progress_receiver = Some(progress_receiver);
         } else {
-            // Show warning if no directories selected
+            // If no directories selected, clear everything
+            self.scanner.lock().unwrap().files.clear();
+            self.scanner.lock().unwrap().tags.clear();
+            self.scanner.lock().unwrap().images.clear();
+            self.physics_simulator.node_positions.clear();
+            self.physics_simulator.node_velocities.clear();
+            self.initial_node_layout.clear();
+            self.file_graph.graph.clear();
+            self.file_graph.node_indices.clear();
+            self.tag_graph.graph.clear();
+            self.tag_graph.file_node_indices.clear();
+            self.tag_graph.tag_node_indices.clear();
+            self.tag_graph.image_node_indices.clear();
+
             self.scan_error = Some("No directories selected for scanning".to_string());
         }
     }
@@ -1014,6 +1058,7 @@ impl FileGraphApp {
             self.collect_selected_paths(child, paths);
         }
     }
+
     fn try_load_file_content(&mut self, path: PathBuf, ctx: &egui::Context) {
         let file_extension = path
             .extension()
@@ -1059,15 +1104,22 @@ impl FileGraphApp {
         let mut changed = false;
         let label = node.path.file_name().unwrap().to_string_lossy().to_string();
 
-        // Render selectable directory node
-        let response = ui.selectable_label(node.selected, label);
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut node.selected, "").changed() {
+                changed = true;
+            }
 
-        if response.clicked() {
-            node.selected = !node.selected;
-            changed = true;
-        }
+            // Clickable label for expansion/collapse
+            if ui
+                .add(egui::Label::new(label).sense(Sense::click()))
+                .clicked()
+            {
+                node.expanded = !node.expanded;
+                changed = true;
+            }
+        });
 
-        if node.selected || node.expanded {
+        if node.expanded {
             ui.indent("dir_indent", |ui| {
                 for child in &mut node.children {
                     if Self::render_directory_tree_node(ui, child) {

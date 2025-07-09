@@ -31,10 +31,6 @@ impl FileScanner {
             return Err(format!("Path is not a directory: {:?}", path));
         }
 
-        self.files.clear();
-        self.tags.clear();
-        self.images.clear();
-
         let entries: Vec<_> = fs::read_dir(path)
             .map_err(|e| e.to_string())?
             .filter_map(|e| e.ok())

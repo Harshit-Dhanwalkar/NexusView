@@ -52,6 +52,7 @@ cargo run --release -- /path/to/your/directory
   - [ ] "Freeze" Physics (button to pause simulation)
   - [x] Layout Reset (button to reset node positions)
   - [x] Graph Search (find nodes by filename or content)
+  - [ ] Toggle hidden files (`.file` and `.dir`)
 - [ ] **Data and Content Enhancements:**
   - [ ] Relative Path Links (full support for `../` and `./` links)
   - [ ] URL/External Links (identify and open external URLs)
