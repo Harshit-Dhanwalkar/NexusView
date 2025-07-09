@@ -79,6 +79,7 @@ pub struct FileGraphApp {
     current_graph_mode: GraphMode,
     show_full_paths: bool,
     physics_simulator: PhysicsSimulator,
+    show_physics_menu: bool,
     is_scanning: bool,
     scan_error: Option<String>,
     selected_node: Option<petgraph::graph::NodeIndex>,
@@ -151,6 +152,21 @@ impl App for FileGraphApp {
             });
             ui.separator();
 
+            // FIX: use uincode icons (file icon has issue)
+            // ui.horizontal(|ui| {
+            //     // Directory panel toggle button
+            //     if ui.button("🗀").clicked() {
+            //         self.show_directory_panel = !self.show_directory_panel;
+            //     }
+            //     // Content panel toggle button
+            //     if ui.button("🗎").clicked() {
+            //         self.show_content_panel = !self.show_content_panel;
+            //     }
+            //     // Physics menu toggle button
+            //     if ui.button("⚙").clicked() {
+            //         self.show_physics_menu = !self.show_physics_menu;
+            //     }
+            // });
             ui.horizontal(|ui| {
                 // Directory panel toggle button
                 if ui.button("📁").clicked() {
@@ -159,6 +175,10 @@ impl App for FileGraphApp {
                 // Content panel toggle button
                 if ui.button("📄").clicked() {
                     self.show_content_panel = !self.show_content_panel;
+                }
+                // Physics menu toggle button
+                if ui.button("⚙️").clicked() {
+                    self.show_physics_menu = !self.show_physics_menu;
                 }
             });
 
@@ -234,60 +254,71 @@ impl App for FileGraphApp {
             });
 
             // Physics controls section
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.group(|ui| {
-                    ui.label("Physics Controls:");
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.physics_simulator.spring_constant,
-                                    0.001..=0.5,
-                                )
-                                .text("Spring K"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.physics_simulator.damping, 0.0..=0.9)
+            if self.show_physics_menu {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.group(|ui| {
+                        ui.label("Physics Controls:");
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut self.physics_simulator.spring_constant,
+                                        0.001..=0.5,
+                                    )
+                                    .text("Spring K"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut self.physics_simulator.damping,
+                                        0.0..=0.9,
+                                    )
                                     .text("Damping"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.physics_simulator.time_step, 0.1..=1.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut self.physics_simulator.time_step,
+                                        0.1..=1.0,
+                                    )
                                     .text("Time Step"),
-                            );
-                        });
-                        ui.vertical(|ui| {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.physics_simulator.repulsion_constant,
-                                    100.0..=50000.0,
-                                )
-                                .text("Repulsion K"),
-                            );
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.physics_simulator.ideal_edge_length,
-                                    10.0..=300.0,
-                                )
-                                .text("Ideal Length"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.physics_simulator.friction, 0.0..=0.9)
+                                );
+                            });
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut self.physics_simulator.repulsion_constant,
+                                        100.0..=50000.0,
+                                    )
+                                    .text("Repulsion K"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut self.physics_simulator.ideal_edge_length,
+                                        10.0..=300.0,
+                                    )
+                                    .text("Ideal Length"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut self.physics_simulator.friction,
+                                        0.0..=0.9,
+                                    )
                                     .text("Friction"),
-                            );
+                                );
+                            });
                         });
+
+                        if ui.button("Reset Node Positions").clicked() {
+                            self.physics_simulator
+                                .reset_positions(&self.initial_node_layout);
+                        }
+
+                        if ui.button("Center Graph").clicked() {
+                            self.center_graph();
+                        }
                     });
-
-                    if ui.button("Reset Node Positions").clicked() {
-                        self.physics_simulator
-                            .reset_positions(&self.initial_node_layout);
-                    }
-
-                    if ui.button("Center Graph").clicked() {
-                        self.center_graph();
-                    }
                 });
-            });
+            }
 
             // Graph Search section
             ui.separator();
@@ -881,6 +912,7 @@ impl FileGraphApp {
             current_graph_mode: GraphMode::Links,
             show_full_paths: false,
             physics_simulator: PhysicsSimulator::new(),
+            show_physics_menu: true,
             is_scanning: false,
             scan_error: None,
             selected_node: None,
