@@ -40,7 +40,6 @@ cargo run --release -- /path/to/your/directory
 - [ ] Fix graph panning
 - [ ] Fix Focus on Node (re-center and zoom on selected node)
 - [ ] Graph mode link and tag in one with toggle
-- [ ] "Show Images" toggle for graph mode link doesn't work (but work for tag mode)
 - [ ] "Show Orphans" unexpected behavior
 - [ ] Graph Search `Next` and `Previous` buttons are doing unexpected behavior
 - [ ] Context menu unexpected behavior
@@ -56,6 +55,7 @@ cargo run --release -- /path/to/your/directory
 - [ ] Layout Algorithm Selection (e.g., Fruchterman-Reingold, Kamada-Kawai, grid, circular)
 - [ ] "Freeze" Physics (button to pause simulation)
 - [x] Toggle hidden files (`.file` and `.dir`)
+- [ ] Fix toggle hidden files whole `pwd` is being rescanned not `selected directory`
 
 ### Data & Content
 

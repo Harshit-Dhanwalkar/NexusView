@@ -1,4 +1,5 @@
 // src/file_scan.rs
+use crate::utils::is_image_path;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
@@ -106,10 +107,7 @@ impl FileScanner {
     fn process_file(&mut self, path: &Path) -> Result<(), String> {
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ind"];
-
-                if image_extensions.contains(&ext_lower.as_str()) {
+                if is_image_path(path) {
                     self.files.insert(path.to_path_buf(), Vec::new());
                     self.images.push(path.to_path_buf());
                 } else if let Ok(content) = fs::read_to_string(path) {

@@ -11,6 +11,7 @@ use std::time::Instant;
 use crate::file_scan::FileScanner;
 use crate::graph::{FileGraph, GraphNode, TagGraph};
 use crate::physics_nodes::PhysicsSimulator;
+use crate::utils::{is_code_path, is_image_path, is_markdown_path, rotate_vec2};
 use egui::{Color32, Sense, Stroke, pos2, vec2};
 use once_cell::sync::Lazy;
 use petgraph::visit::EdgeRef;
@@ -515,15 +516,27 @@ impl App for FileGraphApp {
 
                         match self.current_graph_mode {
                             GraphMode::Links => {
-                                let nodes: Vec<_> =
-                                    self.file_graph.node_indices.values().cloned().collect();
+                                let mut nodes = Vec::new();
+                                let mut edges = Vec::new();
 
-                                let edges: Vec<_> = self
-                                    .file_graph
-                                    .graph
-                                    .edge_references()
-                                    .map(|e| (e.source(), e.target()))
-                                    .collect();
+                                // Add all files
+                                for (path, node_idx) in &self.file_graph.node_indices {
+                                    let is_image = is_image_path(path);
+
+                                    if self.show_images || !is_image {
+                                        nodes.push(*node_idx);
+                                    }
+                                }
+
+                                // Add all edges between visible nodes
+                                for edge in self.file_graph.graph.edge_references() {
+                                    if nodes.contains(&edge.source())
+                                        && nodes.contains(&edge.target())
+                                    {
+                                        edges.push((edge.source(), edge.target()));
+                                    }
+                                }
+
                                 (nodes, edges)
                             }
                             GraphMode::Tags => {
@@ -1403,10 +1416,7 @@ impl FileGraphApp {
                 GraphMode::Tags => &self.tag_graph.graph,
             };
             if let GraphNode::File(file_path_str) = &graph[node_idx] {
-                return PathBuf::from(file_path_str)
-                    .extension()
-                    .map(|ext| ext.to_str().unwrap_or("").to_lowercase() == "md")
-                    .unwrap_or(false);
+                return is_markdown_path(Path::new(file_path_str));
             }
         }
         false
@@ -1419,12 +1429,7 @@ impl FileGraphApp {
                 GraphMode::Tags => &self.tag_graph.graph,
             };
             if let GraphNode::File(file_path_str) = &graph[node_idx] {
-                let path = PathBuf::from(file_path_str);
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    let ext_lower = ext.to_lowercase();
-                    return ["rs", "py", "c", "cpp", "h", "js", "html", "css", "sh"]
-                        .contains(&ext_lower.as_str());
-                }
+                return is_code_path(Path::new(file_path_str));
             }
         }
         false
@@ -1562,10 +1567,4 @@ impl FileGraphApp {
                 .or_else(|| Some(SYNTAX_SET.find_syntax_plain_text())),
         }
     }
-}
-
-fn rotate_vec2(vec: egui::Vec2, angle_radians: f32) -> egui::Vec2 {
-    let cos_a = angle_radians.cos();
-    let sin_a = angle_radians.sin();
-    egui::vec2(vec.x * cos_a - vec.y * sin_a, vec.x * sin_a + vec.y * cos_a)
 }

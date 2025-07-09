@@ -6,6 +6,7 @@ mod file_scan;
 mod graph;
 mod physics_nodes;
 mod ui;
+mod utils;
 
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = std::env::args().collect();
