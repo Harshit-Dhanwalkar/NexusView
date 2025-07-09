@@ -7,6 +7,7 @@ use std::sync::mpsc::Sender;
 
 pub struct FileScanner {
     root_path: PathBuf,
+    current_scan_path: PathBuf,
     show_hidden: bool,
     pub files: HashMap<PathBuf, Vec<PathBuf>>,
     pub images: Vec<PathBuf>,
@@ -15,8 +16,10 @@ pub struct FileScanner {
 
 impl FileScanner {
     pub fn new(root_path: impl AsRef<Path>) -> Self {
+        let path = root_path.as_ref().to_path_buf();
         Self {
             root_path: root_path.as_ref().to_path_buf(),
+            current_scan_path: path,
             show_hidden: false,
             files: HashMap::new(),
             images: Vec::new(),
@@ -40,6 +43,13 @@ impl FileScanner {
         if !path.is_dir() {
             return Err(format!("Path is not a directory: {:?}", path));
         }
+
+        self.current_scan_path = path.to_path_buf();
+
+        // Clear previous results for this path
+        self.files.retain(|k, _| !k.starts_with(path));
+        self.tags.retain(|k, _| !k.starts_with(path));
+        self.images.retain(|k| !k.starts_with(path));
 
         let entries: Vec<_> = fs::read_dir(path)
             .map_err(|e| e.to_string())?
@@ -77,7 +87,7 @@ impl FileScanner {
             let mut resolved_links_for_file = Vec::new();
             for link in links {
                 let resolved_link = if link.is_relative() {
-                    self.root_path.join(link)
+                    self.current_scan_path.join(link)
                 } else {
                     link.clone()
                 };

@@ -254,35 +254,17 @@ impl App for FileGraphApp {
                         scanner_guard.set_show_hidden(self.show_hidden_files);
                     } else {
                         eprintln!("Failed to lock scanner mutex when setting show_hidden.");
+                        return;
                     }
 
-                    // Trigger a re-scan on a new thread
-                    if let Some(sender) = &self.scan_sender {
-                        let scanner_clone_for_thread = self.scanner.clone();
-                        let sender_clone_for_thread = sender.clone();
-                        let ctx_clone_for_thread = ctx.clone();
-
-                        let current_path_for_scan = if let Ok(scanner_guard) =
-                            scanner_clone_for_thread.lock()
-                        {
-                            scanner_guard.root_path().clone()
-                        } else {
-                            eprintln!("Failed to lock scanner mutex to get root_path for re-scan.");
-                            return;
-                        };
-
-                        std::thread::spawn(move || {
-                            if let Ok(mut scanner_guard) = scanner_clone_for_thread.lock() {
-                                let _ = scanner_guard.scan_directory_with_progress(
-                                    &current_path_for_scan,
-                                    sender_clone_for_thread,
-                                );
-                                drop(scanner_guard);
-                                ctx_clone_for_thread.request_repaint();
-                            } else {
-                                eprintln!("Failed to lock scanner mutex during re-scan thread.");
-                            }
-                        });
+                    // Trigger a rescan of the currently selected directory
+                    if !self.is_scanning {
+                        let scan_dir = self
+                            .selected_directory
+                            .clone()
+                            .unwrap_or_else(|| self.scan_dir.clone());
+                        self.current_scan_dir = scan_dir.clone();
+                        self.trigger_scan(scan_dir, ctx);
                     }
                 }
 
@@ -1099,8 +1081,13 @@ impl FileGraphApp {
         self.scan_status = format!("Scanning: {}", path_to_scan.display());
         self.current_scan_dir = path_to_scan.clone();
         self.scan_error = None;
+
+        // Clear graphs before scanning
         self.file_graph.graph.clear();
         self.tag_graph.graph.clear();
+        self.physics_simulator.node_positions.clear();
+        self.physics_simulator.node_velocities.clear();
+        self.initial_node_layout.clear();
 
         let scanner_clone = self.scanner.clone();
         let sender_clone = self
@@ -1114,6 +1101,7 @@ impl FileGraphApp {
             let scan_start_time = Instant::now();
             if let Ok(mut scanner_guard) = scanner_clone.lock() {
                 scanner_guard.set_show_hidden(show_hidden_clone);
+                // Use the provided path_to_scan instead of any other path
                 let scan_result =
                     scanner_guard.scan_directory_with_progress(&path_to_scan, sender_clone.clone());
                 drop(scanner_guard);
@@ -1126,8 +1114,8 @@ impl FileGraphApp {
                     }
                     Err(e) => {
                         eprintln!("Scan error: {}", e);
-                        // Send error back to UI
                         let _ = sender_clone.send((1.0, format!("Error: {}", e)));
+                        // Send error back to UI
                         ctx_clone.request_repaint();
                     }
                 }

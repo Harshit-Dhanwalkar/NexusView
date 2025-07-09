@@ -34,12 +34,12 @@ impl PhysicsSimulator {
         Self {
             node_positions: HashMap::new(),
             node_velocities: HashMap::new(),
-            damping: 0.8,
-            spring_constant: 0.01,
-            repulsion_constant: 10000.0,
-            ideal_edge_length: 100.0,
-            time_step: 0.5,
-            friction: 0.1,
+            damping: 0.55,
+            spring_constant: 0.3,
+            repulsion_constant: 18000.0,
+            ideal_edge_length: 180.0,
+            time_step: 0.3,
+            friction: 0.4,
         }
     }
 
