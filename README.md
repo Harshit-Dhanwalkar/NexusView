@@ -31,49 +31,60 @@ cargo run --release -- /path/to/your/directory
 
 ---
 
-## Todo
+## TODO
 
+### Core Graph Functionality
+
+- [x] Directed Edges (Arrows)
 - [ ] Fix graph zooming
 - [ ] Fix graph panning
-- [ ] "Show Images" toggle for graph mode link doesn't work (but work for tag mode)
-- [ ] "Show Orphans" unexpected behavior
 - [ ] Fix Focus on Node (re-center and zoom on selected node)
 - [ ] Graph mode link and tag in one with toggle
+- [ ] "Show Images" toggle for graph mode link doesn't work (but work for tag mode)
+- [ ] "Show Orphans" unexpected behavior
 - [ ] Graph Search `Next` and `Previous` buttons are doing unexpected behavior
 - [ ] Context menu unexpected behavior
 
-- [ ] **Graph Interaction and Visualization Enhancements:**
-  - [ ] Colors based on file type/tags
-  - [ ] Node Grouping/Clustering
-  - [ ] Weighted Edges
-  - [x] Directed Edges (Arrows)
-  - [ ] Layout Algorithm Selection (e.g., Fruchterman-Reingold, Kamada-Kawai, grid, circular)
-  - [x] Dynamic Physics Parameters (UI controls for damping, spring constant, etc.)
-  - [ ] "Freeze" Physics (button to pause simulation)
-  - [x] Layout Reset (button to reset node positions)
-  - [x] Graph Search (find nodes by filename or content)
-  - [ ] Toggle hidden files (`.file` and `.dir`)
-- [ ] **Data and Content Enhancements:**
-  - [ ] Relative Path Links (full support for `../` and `./` links)
-  - [ ] URL/External Links (identify and open external URLs)
-  - [x] Syntax Highlighting (for code files in preview)
-  - [x] Markdown Rendering (render Markdown content in preview)
-  - [ ] PDF/Document Preview (snippets or basic rendering)
-  - [ ] Tag Cloud/List with frequency
-- [ ] **Configuration and Persistence:**
-  - [ ] Save/Load Layout (persist user-arranged graph layouts)
-  - [ ] Persistent Settings (save app settings between sessions)
-  - [ ] Config File (for custom settings)
-- [ ] **Usability and Polish:**
-  - [x] Progress Indicators (for scanning and graph building)
-  - [ ] Improved Error Handling & Messaging
-  - [x] Context Menus (right-click actions on nodes/files)
-  - [ ] Drag and Drop (files into app, or nodes for re-linking)
-  - [ ] Multi-selection of Nodes
-- [ ] **Performance and Scalability:**
-  - [ ] Lazy Loading/Virtualization (for large lists/graphs)
-  - [ ] Optimized Physics (further performance improvements)
-  - [ ] Incremental Scanning (detect file changes for updates)
+### Graph Interaction & Visualization
+
+- [x] Dynamic Physics Parameters (UI controls for damping, spring constant, etc.)
+- [x] Layout Reset (button to reset node positions)
+- [x] Graph Search (find nodes by filename or content)
+- [ ] Colors based on file type/tags
+- [ ] Node Grouping/Clustering
+- [ ] Weighted Edges
+- [ ] Layout Algorithm Selection (e.g., Fruchterman-Reingold, Kamada-Kawai, grid, circular)
+- [ ] "Freeze" Physics (button to pause simulation)
+- [x] Toggle hidden files (`.file` and `.dir`)
+
+### Data & Content
+
+- [x] Syntax Highlighting (for code files in preview)
+- [x] Markdown Rendering (render Markdown content in preview)
+- [ ] Relative Path Links (full support for `../` and `./` links)
+- [ ] URL/External Links (identify and open external URLs)
+- [ ] PDF/Document Preview (snippets or basic rendering)
+- [ ] Tag Cloud/List with frequency
+
+### Configuration & Persistence
+
+- [ ] Save/Load Layout (persist user-arranged graph layouts)
+- [ ] Persistent Settings (save app settings between sessions)
+- [ ] Config File (for custom settings)
+
+### Usability & Polish
+
+- [x] Progress Indicators (for scanning and graph building)
+- [x] Context Menus (right-click actions on nodes/files)
+- [ ] Improved Error Handling & Messaging
+- [ ] Drag and Drop (files into app, or nodes for re-linking)
+- [ ] Multi-selection of Nodes
+
+### Performance & Scalability
+
+- [ ] Lazy Loading/Virtualization (for large lists/graphs)
+- [ ] Optimized Physics (further performance improvements)
+- [ ] Incremental Scanning (detect file changes for updates)
 
 ---
 

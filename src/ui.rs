@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use crate::file_scan::FileScanner;
 use crate::graph::{FileGraph, GraphNode, TagGraph};
@@ -54,6 +55,30 @@ impl DirectoryNode {
         root_node
     }
 
+    fn set_selected_recursive(&mut self, target_path: &Path, selected: bool) {
+        self.selected = self.path == target_path;
+        for child in &mut self.children {
+            child.set_selected_recursive(target_path, selected);
+        }
+    }
+
+    fn update_selection(&mut self, new_selection_path: &Path) {
+        self.set_selected_recursive(new_selection_path, false);
+        self.set_selected_recursive(new_selection_path, true);
+    }
+
+    fn get_selected_directory(&self) -> Option<PathBuf> {
+        if self.selected {
+            return Some(self.path.clone());
+        }
+        for child in &self.children {
+            if let Some(selected_path) = child.get_selected_directory() {
+                return Some(selected_path);
+            }
+        }
+        None
+    }
+
     fn populate_node(node: &mut DirectoryNode) {
         if let Ok(entries) = std::fs::read_dir(&node.path) {
             for entry in entries.filter_map(|e| e.ok()) {
@@ -77,6 +102,7 @@ pub struct FileGraphApp {
     file_graph: FileGraph,
     tag_graph: TagGraph,
     current_graph_mode: GraphMode,
+    current_scan_dir: PathBuf,
     show_full_paths: bool,
     physics_simulator: PhysicsSimulator,
     show_physics_menu: bool,
@@ -95,12 +121,14 @@ pub struct FileGraphApp {
     current_directory_label: String,
     show_images: bool,
     // show_orphans: bool,
-    graph_rect: egui::Rect,
+    show_hidden_files: bool,
     markdown_cache: egui_commonmark::CommonMarkCache,
     scan_progress: f32,
     scan_status: String,
+    graph_rect: egui::Rect,
     graph_build_progress: f32,
     graph_build_status: String,
+    scan_sender: Option<std::sync::mpsc::Sender<(f32, String)>>,
     scan_progress_receiver: Option<std::sync::mpsc::Receiver<(f32, String)>>,
     search_query: String,
     search_results: Vec<NodeIndex>,
@@ -218,6 +246,46 @@ impl App for FileGraphApp {
                 // ui.checkbox(&mut self.show_orphans, "Show Orphans");
                 ui.checkbox(&mut self.show_images, "Show Images");
 
+                if ui
+                    .checkbox(&mut self.show_hidden_files, "Show Hidden Files")
+                    .changed()
+                {
+                    if let Ok(mut scanner_guard) = self.scanner.lock() {
+                        scanner_guard.set_show_hidden(self.show_hidden_files);
+                    } else {
+                        eprintln!("Failed to lock scanner mutex when setting show_hidden.");
+                    }
+
+                    // Trigger a re-scan on a new thread
+                    if let Some(sender) = &self.scan_sender {
+                        let scanner_clone_for_thread = self.scanner.clone();
+                        let sender_clone_for_thread = sender.clone();
+                        let ctx_clone_for_thread = ctx.clone();
+
+                        let current_path_for_scan = if let Ok(scanner_guard) =
+                            scanner_clone_for_thread.lock()
+                        {
+                            scanner_guard.root_path().clone()
+                        } else {
+                            eprintln!("Failed to lock scanner mutex to get root_path for re-scan.");
+                            return;
+                        };
+
+                        std::thread::spawn(move || {
+                            if let Ok(mut scanner_guard) = scanner_clone_for_thread.lock() {
+                                let _ = scanner_guard.scan_directory_with_progress(
+                                    &current_path_for_scan,
+                                    sender_clone_for_thread,
+                                );
+                                drop(scanner_guard);
+                                ctx_clone_for_thread.request_repaint();
+                            } else {
+                                eprintln!("Failed to lock scanner mutex during re-scan thread.");
+                            }
+                        });
+                    }
+                }
+
                 ui.separator();
 
                 ui.label("Filter Tags:");
@@ -229,14 +297,19 @@ impl App for FileGraphApp {
                     self.scan_progress = 0.0;
                     self.scan_status = "Starting scan...".to_string();
 
+                    let scan_dir = self
+                        .selected_directory
+                        .clone()
+                        .unwrap_or_else(|| self.scan_dir.clone());
+                    self.current_scan_dir = scan_dir.clone();
+
                     let scanner_arc_clone = self.scanner.clone();
-                    let scan_dir_clone = self.scan_dir.clone();
                     let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
 
                     thread::spawn(move || {
                         let mut scanner = scanner_arc_clone.lock().unwrap();
                         if let Err(e) =
-                            scanner.scan_directory_with_progress(&scan_dir_clone, progress_sender)
+                            scanner.scan_directory_with_progress(&scan_dir, progress_sender)
                         {
                             eprintln!("Error during scan: {}", e);
                         }
@@ -949,12 +1022,24 @@ impl FileGraphApp {
     pub fn new(scan_dir: PathBuf) -> Self {
         let scanner = Arc::new(Mutex::new(FileScanner::new(&scan_dir)));
         let directory_tree = DirectoryNode::build_tree(&scan_dir);
+        let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
+        // Initial scan on a separate thread
+        let initial_scanner_clone = scanner.clone();
+        let initial_root_path = scan_dir.clone();
+        let initial_sender_clone = progress_sender.clone();
 
-        let app = Self {
+        std::thread::spawn(move || {
+            let mut locked_scanner = initial_scanner_clone.lock().unwrap();
+            let _ = locked_scanner
+                .scan_directory_with_progress(&initial_root_path, initial_sender_clone);
+        });
+
+        let mut app = Self {
             scan_dir: scan_dir.clone(),
             show_directory_panel: true,
             directory_tree,
             selected_directory: Some(scan_dir.clone()),
+            current_scan_dir: scan_dir.clone(),
             scanner: scanner.clone(),
             file_graph: FileGraph::new(),
             tag_graph: TagGraph::new(),
@@ -976,13 +1061,15 @@ impl FileGraphApp {
             current_directory_label: scan_dir.display().to_string(),
             show_images: true,
             // show_orphans: true,
+            show_hidden_files: false,
             graph_rect: egui::Rect::NOTHING,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             scan_progress: 0.0,
             scan_status: String::new(),
             graph_build_progress: 0.0,
-            graph_build_status: String::new(),
-            scan_progress_receiver: None,
+            graph_build_status: "Ready".to_string(),
+            scan_sender: Some(progress_sender),
+            scan_progress_receiver: Some(progress_receiver),
             search_query: String::new(),
             search_results: Vec::new(),
             current_search_result: 0,
@@ -991,9 +1078,130 @@ impl FileGraphApp {
             menu_open: false,
             syntax_cache: HashMap::new(),
             markdown_syntax: SYNTAX_SET.find_syntax_by_extension("md").cloned(),
-            show_content_panel: true, // Initialize to true so it's visible by default
+            show_content_panel: true,
         };
+
+        if let Some(initial_scan_path) = app.selected_directory.clone() {
+            app.trigger_scan(initial_scan_path.clone(), &egui::Context::default());
+        }
+
         app
+    }
+
+    fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
+        if self.is_scanning {
+            eprintln!("Already scanning, ignoring new scan request.");
+            return;
+        }
+
+        self.is_scanning = true;
+        self.scan_progress = 0.0;
+        self.scan_status = format!("Scanning: {}", path_to_scan.display());
+        self.current_scan_dir = path_to_scan.clone();
+        self.scan_error = None;
+        self.file_graph.graph.clear();
+        self.tag_graph.graph.clear();
+
+        let scanner_clone = self.scanner.clone();
+        let sender_clone = self
+            .scan_sender
+            .clone()
+            .expect("Scan sender not initialized");
+        let ctx_clone = ctx.clone();
+        let show_hidden_clone = self.show_hidden_files;
+
+        thread::spawn(move || {
+            let scan_start_time = Instant::now();
+            if let Ok(mut scanner_guard) = scanner_clone.lock() {
+                scanner_guard.set_show_hidden(show_hidden_clone);
+                let scan_result =
+                    scanner_guard.scan_directory_with_progress(&path_to_scan, sender_clone.clone());
+                drop(scanner_guard);
+
+                match scan_result {
+                    Ok(_) => {
+                        println!("Scan completed in {:?}", scan_start_time.elapsed());
+                        // Trigger graph rebuild after scan
+                        ctx_clone.request_repaint();
+                    }
+                    Err(e) => {
+                        eprintln!("Scan error: {}", e);
+                        // Send error back to UI
+                        let _ = sender_clone.send((1.0, format!("Error: {}", e)));
+                        ctx_clone.request_repaint();
+                    }
+                }
+            } else {
+                let _ =
+                    sender_clone.send((1.0, "Error: Could not lock scanner for scan.".to_string()));
+                ctx_clone.request_repaint();
+            }
+        });
+    }
+
+    fn build_graphs(&mut self) {
+        self.graph_build_progress = 0.0;
+        self.graph_build_status = "Building graphs...".to_string();
+
+        let scanner_guard = self
+            .scanner
+            .lock()
+            .expect("Failed to lock scanner for graph build");
+        self.file_graph.build_from_scanner(&scanner_guard);
+        self.tag_graph.build_from_tags(&scanner_guard);
+        drop(scanner_guard); // Release lock
+
+        // Calculate initial layout for physics simulation
+        self.initial_node_layout.clear();
+        let mut rng = rand::rng();
+        let graph_center = self.graph_rect.center();
+        let radius = self.graph_rect.width().min(self.graph_rect.height()) / 3.0;
+
+        // Use the combined nodes from both graphs to initialize physics
+        let mut all_node_indices: HashMap<NodeIndex, GraphNode> = HashMap::new();
+        for (idx, node) in self.file_graph.graph.node_weights().enumerate() {
+            all_node_indices.insert(NodeIndex::new(idx), node.clone());
+        }
+        for (idx, node) in self.tag_graph.graph.node_weights().enumerate() {
+            all_node_indices.insert(NodeIndex::new(idx), node.clone());
+        }
+
+        for (node_idx, _) in &all_node_indices {
+            let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+            let x = graph_center.x + radius * angle.cos();
+            let y = graph_center.y + radius * angle.sin();
+            self.initial_node_layout.insert(*node_idx, egui::vec2(x, y));
+        }
+
+        self.physics_simulator.node_positions = self.initial_node_layout.clone();
+        self.physics_simulator.initialize_velocities();
+
+        self.graph_build_progress = 1.0;
+        self.graph_build_status = "Graphs built.".to_string();
+    }
+
+    fn draw_directory_node_recursive(
+        &mut self,
+        ui: &mut egui::Ui,
+        node: &mut DirectoryNode,
+        ctx: &egui::Context,
+    ) {
+        ui.collapsing(
+            node.path.file_name().unwrap_or_default().to_string_lossy(),
+            |ui| {
+                let response = ui.selectable_label(node.selected, node.path.display().to_string());
+
+                if response.clicked() {
+                    self.directory_tree.update_selection(&node.path);
+                    self.selected_directory = Some(node.path.clone());
+                    self.current_scan_dir = node.path.clone();
+                    self.current_directory_label = node.path.display().to_string();
+
+                    // When a directory is selected, trigger a scan for that directory
+                    self.trigger_scan(node.path.clone(), ctx);
+                }
+            },
+        );
     }
 
     fn scan_selected_directories(&mut self, ctx: &egui::Context) {

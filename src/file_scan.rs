@@ -7,6 +7,7 @@ use std::sync::mpsc::Sender;
 
 pub struct FileScanner {
     root_path: PathBuf,
+    show_hidden: bool,
     pub files: HashMap<PathBuf, Vec<PathBuf>>,
     pub images: Vec<PathBuf>,
     pub tags: HashMap<PathBuf, Vec<String>>,
@@ -16,10 +17,19 @@ impl FileScanner {
     pub fn new(root_path: impl AsRef<Path>) -> Self {
         Self {
             root_path: root_path.as_ref().to_path_buf(),
+            show_hidden: false,
             files: HashMap::new(),
             images: Vec::new(),
             tags: HashMap::new(),
         }
+    }
+
+    pub fn set_show_hidden(&mut self, show: bool) {
+        self.show_hidden = show;
+    }
+
+    pub fn root_path(&self) -> &PathBuf {
+        &self.root_path
     }
 
     pub fn scan_directory_with_progress(
@@ -39,12 +49,26 @@ impl FileScanner {
         let total = entries.len();
         for (i, entry) in entries.into_iter().enumerate() {
             let path = entry.path();
+            if !self.show_hidden
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map_or(false, |name| name.starts_with('.'))
+            {
+                continue; // Skip hidden files if show_hidden is false
+            }
+
             let progress = (i as f32) / (total as f32);
             progress_sender
                 .send((progress, format!("Scanning: {}", path.display())))
                 .map_err(|e| e.to_string())?;
 
-            self.process_file(&path)?;
+            // If a directory, recursively scan it
+            if path.is_dir() {
+                self.scan_directory_with_progress(&path, progress_sender.clone())?;
+            } else {
+                self.process_file(&path)?;
+            }
         }
 
         // Resolve links after scanning
