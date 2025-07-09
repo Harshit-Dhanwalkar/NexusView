@@ -84,6 +84,7 @@ pub struct FileGraphApp {
     selected_node: Option<petgraph::graph::NodeIndex>,
     selected_file_content: Option<String>,
     selected_image: Option<egui::TextureHandle>,
+    show_content_panel: bool,
     tag_filter_input: String,
     initial_node_layout: HashMap<petgraph::graph::NodeIndex, egui::Vec2>,
     graph_center_offset: egui::Vec2,
@@ -150,9 +151,16 @@ impl App for FileGraphApp {
             });
             ui.separator();
 
-            if ui.button("📁").clicked() {
-                self.show_directory_panel = !self.show_directory_panel;
-            }
+            ui.horizontal(|ui| {
+                // Directory panel toggle button
+                if ui.button("📁").clicked() {
+                    self.show_directory_panel = !self.show_directory_panel;
+                }
+                // Content panel toggle button
+                if ui.button("📄").clicked() {
+                    self.show_content_panel = !self.show_content_panel;
+                }
+            });
 
             // Main controls row
             ui.horizontal(|ui| {
@@ -313,7 +321,7 @@ impl App for FileGraphApp {
             .show_animated(ctx, self.show_directory_panel, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("Directories");
-                    if ui.button("⏵").clicked() {
+                    if ui.button("◀").clicked() {
                         self.show_directory_panel = !self.show_directory_panel;
                     }
                 });
@@ -457,10 +465,10 @@ impl App for FileGraphApp {
 
                     for node_idx in &nodes_to_draw {
                         if !self.physics_simulator.node_positions.contains_key(node_idx) {
-                            let mut rng = rand::rng();
+                            let mut rng = rand::thread_rng(); // Corrected: use thread_rng
                             let random_pos = egui::vec2(
-                                rng.random_range(-100.0..100.0),
-                                rng.random_range(-100.0..100.0),
+                                rng.gen_range(-100.0..100.0), // Corrected: use gen_range
+                                rng.gen_range(-100.0..100.0), // Corrected: use gen_range
                             );
                             self.physics_simulator
                                 .node_positions
@@ -697,6 +705,7 @@ impl App for FileGraphApp {
                                         }
                                     }
                                 }
+                                self.show_content_panel = true; // Show content panel on node click
                             }
 
                             if node_response.clicked_by(egui::PointerButton::Secondary) {
@@ -823,8 +832,13 @@ impl App for FileGraphApp {
         // Right panel for file content
         egui::SidePanel::right("file_content_panel")
             .min_width(200.0)
-            .show(ctx, |ui| {
-                ui.heading("File Content");
+            .show_animated(ctx, self.show_content_panel, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("File Content");
+                    if ui.button("▶").clicked() {
+                        self.show_content_panel = !self.show_content_panel;
+                    }
+                });
                 ui.separator();
 
                 if let Some(content) = &self.selected_file_content {
@@ -896,6 +910,7 @@ impl FileGraphApp {
             menu_open: false,
             syntax_cache: HashMap::new(),
             markdown_syntax: SYNTAX_SET.find_syntax_by_extension("md").cloned(),
+            show_content_panel: true, // Initialize to true so it's visible by default
         };
         app
     }
