@@ -30,8 +30,49 @@ enum GraphMode {
     Tags,
 }
 
+#[derive(Debug, Clone)]
+struct DirectoryNode {
+    path: PathBuf,
+    children: Vec<DirectoryNode>,
+    expanded: bool,
+    selected: bool,
+}
+
+impl DirectoryNode {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            children: Vec::new(),
+            expanded: false,
+            selected: false,
+        }
+    }
+
+    fn build_tree(root_path: &Path) -> Self {
+        let mut root_node = DirectoryNode::new(root_path.to_path_buf());
+        Self::populate_node(&mut root_node);
+        root_node
+    }
+
+    fn populate_node(node: &mut DirectoryNode) {
+        if let Ok(entries) = std::fs::read_dir(&node.path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    let mut child_node = DirectoryNode::new(path);
+                    Self::populate_node(&mut child_node);
+                    node.children.push(child_node);
+                }
+            }
+        }
+    }
+}
+
 pub struct FileGraphApp {
     scan_dir: PathBuf,
+    show_directory_panel: bool,
+    directory_tree: DirectoryNode,
+    selected_directory: Option<PathBuf>,
     scanner: Arc<Mutex<FileScanner>>,
     file_graph: FileGraph,
     tag_graph: TagGraph,
@@ -109,6 +150,10 @@ impl App for FileGraphApp {
             });
             ui.separator();
 
+            if ui.button("📁").clicked() {
+                self.show_directory_panel = !self.show_directory_panel;
+            }
+
             // Main controls row
             ui.horizontal(|ui| {
                 ui.label("Graph Mode:");
@@ -139,6 +184,7 @@ impl App for FileGraphApp {
                 ui.text_edit_singleline(&mut self.tag_filter_input);
 
                 if ui.button("Rescan Directory").clicked() && !self.is_scanning {
+                    self.scan_error = None;
                     self.is_scanning = true;
                     self.scan_progress = 0.0;
                     self.scan_status = "Starting scan...".to_string();
@@ -259,731 +305,580 @@ impl App for FileGraphApp {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let (response, painter) = ui.allocate_painter(
-                ui.available_size(),
-                egui::Sense::hover() | egui::Sense::drag() | egui::Sense::click(),
-            );
-
-            self.graph_rect = response.rect;
-            let graph_rect = response.rect;
-            let to_screen = egui::emath::RectTransform::from_to(
-                egui::Rect::from_center_size(egui::Pos2::ZERO, graph_rect.size()),
-                graph_rect,
-            );
-
-            if self.graph_build_progress < 1.0 {
-                ui.with_layout(
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.add(
-                                egui::ProgressBar::new(self.graph_build_progress).show_percentage(),
-                            );
-                            ui.label(&self.graph_build_status);
-                        });
-                    },
-                );
-            }
-
-            if response.hovered() {
-                self.graph_zoom_factor *= ctx.input(|i| i.zoom_delta());
-                self.graph_zoom_factor = self.graph_zoom_factor.clamp(0.1, 10.0);
-            }
-
-            if response.dragged_by(egui::PointerButton::Middle) {
-                self.graph_center_offset += response.drag_delta() / self.graph_zoom_factor;
-            }
-
-            if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-                if let Some(node_idx) = self.selected_node {
-                    self.focus_on_node(node_idx);
-                }
-            }
-
-            if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
-                self.focus_next_search_result();
-            }
-
-            if ctx.input(|i| i.key_pressed(egui::Key::F3) && i.modifiers.shift) {
-                self.focus_prev_search_result();
-            }
-
-            {
-                let scanner_locked = self.scanner.lock().unwrap();
-                self.file_graph.build_from_scanner(&scanner_locked);
-                self.tag_graph.build_from_tags(&scanner_locked);
-            }
-
-            // node filtering logic:
-            let (nodes_to_draw, edges_to_draw) = {
-                let scanner_locked = self.scanner.lock().unwrap();
-
-                match self.current_graph_mode {
-                    GraphMode::Links => {
-                        let nodes: Vec<_> =
-                            self.file_graph.node_indices.values().cloned().collect();
-
-                        let edges: Vec<_> = self
-                            .file_graph
-                            .graph
-                            .edge_references()
-                            .map(|e| (e.source(), e.target()))
-                            .collect();
-                        (nodes, edges)
+        // Left directory panel
+        let panel_width = 200.0;
+        let panel_response = egui::SidePanel::left("directory_panel")
+            .resizable(true)
+            .default_width(panel_width)
+            .show_animated(ctx, self.show_directory_panel, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Directories");
+                    if ui.button("⏵").clicked() {
+                        self.show_directory_panel = !self.show_directory_panel;
                     }
-                    GraphMode::Tags => {
-                        let filtered_tag_nodes: HashMap<_, _> = self
-                            .tag_graph
-                            .tag_node_indices
-                            .iter()
-                            .filter(|(tag_name, _)| {
-                                self.tag_filter_input.is_empty()
-                                    || tag_name.contains(&self.tag_filter_input)
-                            })
-                            .map(|(tag_name, &node_idx)| (tag_name.clone(), node_idx))
-                            .collect();
+                });
 
-                        let mut nodes = Vec::new();
-                        let mut edges = Vec::new();
-
-                        // Always include all file nodes with tags
-                        nodes.extend(self.tag_graph.file_node_indices.values());
-
-                        // Include images if show_images is true
-                        if self.show_images {
-                            nodes.extend(self.tag_graph.image_node_indices.values());
-                        }
-
-                        // Include tag nodes that match the filter
-                        for (_, &tag_node_idx) in &filtered_tag_nodes {
-                            nodes.push(tag_node_idx);
-                            for edge_ref in self.tag_graph.graph.edges(tag_node_idx) {
-                                edges.push((edge_ref.source(), edge_ref.target()));
-                            }
-                        }
-                        (nodes, edges)
-                    }
+                // Add scan selected button
+                if ui.button("📂 Scan Selected").clicked() {
+                    self.scan_selected_directories(ctx);
                 }
-            };
 
-            for node_idx in &nodes_to_draw {
-                if !self.physics_simulator.node_positions.contains_key(node_idx) {
-                    let mut rng = rand::rng();
-                    let random_pos = egui::vec2(
-                        rng.random_range(-100.0..100.0),
-                        rng.random_range(-100.0..100.0),
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let tree = &mut self.directory_tree;
+                    FileGraphApp::render_directory_tree_node(ui, tree);
+                });
+            });
+
+        // Central panel
+        let central_response =
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    let available_width = if self.show_directory_panel {
+                        ui.available_width()
+                            - panel_response
+                                .as_ref()
+                                .map_or(0.0, |r| r.response.rect.width())
+                    } else {
+                        ui.available_width()
+                    };
+                    ui.set_width(available_width);
+
+                    let (response, painter) = ui.allocate_painter(
+                        ui.available_size(),
+                        egui::Sense::hover() | egui::Sense::drag() | egui::Sense::click(),
                     );
-                    self.physics_simulator
-                        .node_positions
-                        .insert(*node_idx, random_pos);
-                    self.physics_simulator
-                        .node_velocities
-                        .insert(*node_idx, egui::Vec2::ZERO);
-                    self.initial_node_layout.insert(*node_idx, random_pos);
-                }
-            }
 
-            self.physics_simulator
-                .node_positions
-                .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
-            self.physics_simulator
-                .node_velocities
-                .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
-            self.initial_node_layout
-                .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+                    self.graph_rect = response.rect;
+                    let graph_rect = response.rect;
+                    let to_screen = egui::emath::RectTransform::from_to(
+                        egui::Rect::from_center_size(egui::Pos2::ZERO, graph_rect.size()),
+                        graph_rect,
+                    );
 
-            if self.dragged_node.is_none() {
-                self.physics_simulator.update(&edges_to_draw);
-            }
-
-            for (start_node_idx, end_node_idx) in &edges_to_draw {
-                if let (Some(&start_pos), Some(&end_pos)) = (
-                    self.physics_simulator.get_node_position(*start_node_idx),
-                    self.physics_simulator.get_node_position(*end_node_idx),
-                ) {
-                    let start_screen_pos = to_screen.transform_pos(pos2(
-                        start_pos.x * self.graph_zoom_factor + self.graph_center_offset.x,
-                        start_pos.y * self.graph_zoom_factor + self.graph_center_offset.y,
-                    ));
-                    let end_screen_pos = to_screen.transform_pos(pos2(
-                        end_pos.x * self.graph_zoom_factor + self.graph_center_offset.x,
-                        end_pos.y * self.graph_zoom_factor + self.graph_center_offset.y,
-                    ));
-
-                    let stroke = Stroke::new(1.0, Color32::GRAY);
-                    painter.line_segment([start_screen_pos, end_screen_pos], stroke);
-
-                    let vec_between = end_screen_pos - start_screen_pos;
-                    let end_point_for_arrow = start_screen_pos + vec_between * 0.9;
-
-                    let dir = vec_between.normalized();
-                    let arrow_size = 8.0;
-
-                    let arrow_tip1 = end_point_for_arrow - rotate_vec2(dir, 0.5) * arrow_size;
-                    let arrow_tip2 = end_point_for_arrow - rotate_vec2(dir, -0.5) * arrow_size;
-
-                    painter.line_segment([end_point_for_arrow, arrow_tip1], stroke);
-                    painter.line_segment([end_point_for_arrow, arrow_tip2], stroke);
-                }
-            }
-
-            for &node_idx in &nodes_to_draw {
-                if let Some(node_pos_vec2) =
-                    self.physics_simulator.get_node_position(node_idx).cloned()
-                {
-                    let screen_pos = to_screen.transform_pos(pos2(
-                        node_pos_vec2.x * self.graph_zoom_factor + self.graph_center_offset.x,
-                        node_pos_vec2.y * self.graph_zoom_factor + self.graph_center_offset.y,
-                    ));
-
-                    let node_name = match self.current_graph_mode {
-                        GraphMode::Links => match &self.file_graph.graph[node_idx] {
-                            GraphNode::File(s) => s.clone(),
-                            GraphNode::Tag(s) => s.clone(),
-                        },
-                        GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
-                            GraphNode::File(s) => s.clone(),
-                            GraphNode::Tag(s) => s.clone(),
-                        },
-                    };
-
-                    let node_radius = 15.0 * self.graph_zoom_factor;
-                    let node_color = if Some(node_idx) == self.selected_node {
-                        Color32::from_rgb(255, 100, 100)
-                    } else if self.search_results.contains(&node_idx) {
-                        Color32::from_rgb(100, 255, 100)
-                    } else {
-                        match self.current_graph_mode {
-                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
-                                GraphNode::File(path) => {
-                                    let path = Path::new(path);
-                                    let is_image = path
-                                        .extension()
-                                        .map(|ext| {
-                                            let ext = ext.to_string_lossy().to_lowercase();
-                                            ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ind"]
-                                                .contains(&ext.as_str())
-                                        })
-                                        .unwrap_or(false);
-                                    if is_image {
-                                        Color32::from_rgb(255, 165, 0)
-                                    } else {
-                                        Color32::BLUE
-                                    }
-                                }
-                                GraphNode::Tag(_) => Color32::GREEN,
-                            },
-                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
-                                GraphNode::File(path) => {
-                                    let scanner_locked = self.scanner.lock().unwrap();
-                                    let has_tags =
-                                        scanner_locked.tags.contains_key(Path::new(path));
-                                    let is_image = Path::new(path)
-                                        .extension()
-                                        .map(|ext| {
-                                            let ext = ext.to_string_lossy().to_lowercase();
-                                            ["png", "jpg", "jpeg", "gif", "bmp", "webp"]
-                                                .contains(&ext.as_str())
-                                        })
-                                        .unwrap_or(false);
-
-                                    if is_image {
-                                        Color32::from_rgb(255, 165, 0)
-                                    } else if has_tags {
-                                        Color32::BLUE
-                                    } else {
-                                        Color32::GRAY
-                                    }
-                                }
-                                GraphNode::Tag(_) => Color32::GREEN,
-                            },
-                        }
-                    };
-
-                    // Pulse effect for selected node
-                    let pulse = if Some(node_idx) == self.selected_node {
-                        ctx.input(|i| i.time as f32).sin().abs() * 0.2 + 0.8
-                    } else {
-                        1.0
-                    };
-
-                    painter.circle_filled(screen_pos, node_radius * pulse, node_color);
-
-                    let display_name = if self.show_full_paths {
-                        node_name.clone()
-                    } else {
-                        PathBuf::from(&node_name).file_name().map_or_else(
-                            || node_name.clone(),
-                            |os_str| os_str.to_string_lossy().into_owned(),
-                        )
-                    };
-
-                    let font_id = egui::TextStyle::Body.resolve(ui.style());
-                    let text_galley =
-                        ui.fonts(|f| f.layout_no_wrap(display_name, font_id, Color32::WHITE));
-
-                    let text_pos =
-                        screen_pos + vec2(-text_galley.size().x / 2.0, node_radius + 5.0);
-                    painter.galley(text_pos, text_galley.clone(), Color32::WHITE);
-
-                    let node_rect = if text_galley.size().y > 0.0 {
-                        egui::Rect::from_center_size(
-                            screen_pos,
-                            egui::vec2(node_radius * 2.0, node_radius * 2.0 + text_galley.size().y),
-                        )
-                    } else {
-                        egui::Rect::from_center_size(
-                            screen_pos,
-                            egui::vec2(node_radius * 2.0, node_radius * 2.0),
-                        )
-                    };
-
-                    let node_response =
-                        ui.interact(node_rect, ui.id().with(node_idx), Sense::click_and_drag());
-
-                    if node_response.dragged_by(egui::PointerButton::Primary) {
-                        let delta = node_response.drag_delta() / self.graph_zoom_factor;
-                        self.physics_simulator
-                            .set_node_position(node_idx, node_pos_vec2 + delta);
-                        self.dragged_node = Some(node_idx);
-                        self.last_drag_pos = Some(node_response.rect.center());
-                    } else if node_response.drag_stopped() {
-                        self.dragged_node = None;
-                        self.last_drag_pos = None;
-                    }
-
-                    // Hover effect for absolute path
-                    if node_response.hovered() {
-                        let full_name = match self.current_graph_mode {
-                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
-                                GraphNode::File(file_path_str) => file_path_str.clone(),
-                                GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
-                            },
-                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
-                                GraphNode::File(file_path_str) => file_path_str.clone(),
-                                GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
-                            },
-                        };
-                        egui::show_tooltip_at_pointer(
-                            ctx,
-                            egui::LayerId::background(),
-                            egui::Id::new("node_tooltip").with(node_idx),
+                    if self.graph_build_progress < 1.0 {
+                        ui.with_layout(
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                             |ui| {
-                                ui.label(full_name);
-                                if ui.button("Focus").clicked() {
-                                    self.focus_on_node(node_idx);
-                                }
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.add(
+                                        egui::ProgressBar::new(self.graph_build_progress)
+                                            .show_percentage(),
+                                    );
+                                    ui.label(&self.graph_build_status);
+                                });
                             },
                         );
                     }
 
-                    // Left-click to select node and show content
-                    if node_response.clicked() {
-                        self.selected_node = Some(node_idx);
-                        self.selected_image = None;
-                        self.selected_file_content = None;
+                    if response.hovered() {
+                        self.graph_zoom_factor *= ctx.input(|i| i.zoom_delta());
+                        self.graph_zoom_factor = self.graph_zoom_factor.clamp(0.1, 10.0);
+                    }
 
-                        let path_buf = match self.current_graph_mode {
-                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
-                                GraphNode::File(s) => PathBuf::from(s),
-                                GraphNode::Tag(_) => PathBuf::new(),
-                            },
-                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
-                                GraphNode::File(s) => PathBuf::from(s),
-                                GraphNode::Tag(_) => PathBuf::new(),
-                            },
-                        };
+                    if response.dragged_by(egui::PointerButton::Middle) {
+                        self.graph_center_offset += response.drag_delta() / self.graph_zoom_factor;
+                    }
 
-                        if path_buf.exists() && path_buf.is_file() {
-                            if let Some(ext) = path_buf.extension().and_then(|e| e.to_str()) {
-                                let image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
-                                if image_extensions.contains(&ext.to_lowercase().as_str()) {
-                                    match image::open(&path_buf) {
-                                        Ok(img) => {
-                                            let size = [img.width() as _, img.height() as _];
-                                            let image_buffer = img.to_rgba8();
-                                            let pixels = image_buffer.as_flat_samples();
-                                            let color_image =
-                                                egui::ColorImage::from_rgba_unmultiplied(
-                                                    size,
-                                                    pixels.as_slice(),
-                                                );
-                                            self.selected_image = Some(ctx.load_texture(
-                                                path_buf.to_string_lossy(),
-                                                color_image,
-                                                egui::TextureOptions::LINEAR,
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Error loading image: {}", e);
-                                            self.selected_image = None;
-                                        }
-                                    }
-                                } else {
-                                    self.selected_file_content =
-                                        std::fs::read_to_string(&path_buf).ok();
-                                }
-                            } else {
-                                self.selected_file_content =
-                                    std::fs::read_to_string(&path_buf).ok();
-                            }
+                    if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+                        if let Some(node_idx) = self.selected_node {
+                            self.focus_on_node(node_idx);
                         }
                     }
 
-                    // Right-click to open menu
-                    if node_response.clicked_by(egui::PointerButton::Secondary) {
-                        self.open_menu_on_node = Some(node_idx);
-                        // Store the current pointer position for the menu
-                        self.right_click_menu_pos = ctx.input(|i| i.pointer.interact_pos());
-                        self.menu_open = true;
+                    if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
+                        self.focus_next_search_result();
                     }
-                }
-            }
 
-            // Render the custom right-click menu as an egui::Window
-            if let Some(menu_node_idx) = self.open_menu_on_node {
-                if let Some(menu_pos) = self.right_click_menu_pos {
-                    // Use the stored mouse position
-                    let mut is_open = true;
-                    let window_response = egui::Window::new("Node Actions")
-                        .id(egui::Id::new("right_click_node_menu").with(menu_node_idx))
-                        .default_pos(menu_pos)
-                        .collapsible(false)
-                        .resizable(false)
-                        .default_width(200.0)
-                        .show(ctx, |ui| {
-                            let full_name_for_menu = match self.current_graph_mode {
-                                GraphMode::Links => match &self.file_graph.graph[menu_node_idx] {
-                                    GraphNode::File(file_path_str) => file_path_str.clone(),
-                                    GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
-                                },
-                                GraphMode::Tags => match &self.tag_graph.graph[menu_node_idx] {
-                                    GraphNode::File(file_path_str) => file_path_str.clone(),
-                                    GraphNode::Tag(tag_name) => format!("Tag: #{}", tag_name),
-                                },
-                            };
-                            ui.label(full_name_for_menu);
-                            ui.separator();
+                    if ctx.input(|i| i.key_pressed(egui::Key::F3) && i.modifiers.shift) {
+                        self.focus_prev_search_result();
+                    }
 
-                            let path_buf_option = match self.current_graph_mode {
-                                GraphMode::Links => match &self.file_graph.graph[menu_node_idx] {
-                                    GraphNode::File(s) => Some(PathBuf::from(s)),
-                                    GraphNode::Tag(_) => None,
-                                },
-                                GraphMode::Tags => match &self.tag_graph.graph[menu_node_idx] {
-                                    GraphNode::File(s) => Some(PathBuf::from(s)),
-                                    GraphNode::Tag(_) => None,
-                                },
-                            };
+                    {
+                        let scanner_locked = self.scanner.lock().unwrap();
+                        self.file_graph.build_from_scanner(&scanner_locked);
+                        self.tag_graph.build_from_tags(&scanner_locked);
+                    }
 
-                            if let Some(path_buf) = path_buf_option {
-                                if path_buf.is_file() {
-                                    if ui.button("Open File").clicked() {
-                                        #[cfg(target_os = "linux")]
-                                        {
-                                            std::process::Command::new("xdg-open")
-                                                .arg(&path_buf)
-                                                .spawn()
-                                                .expect("Failed to open file");
-                                        }
-                                        #[cfg(target_os = "macos")]
-                                        {
-                                            std::process::Command::new("open")
-                                                .arg(&path_buf)
-                                                .spawn()
-                                                .expect("Failed to open file");
-                                        }
-                                        #[cfg(target_os = "windows")]
-                                        {
-                                            std::process::Command::new("cmd")
-                                                .arg("/C")
-                                                .arg("start")
-                                                .arg(&path_buf)
-                                                .spawn()
-                                                .expect("Failed to open file");
-                                        }
-                                        is_open = false;
-                                    }
-                                    if ui.button("Copy Path").clicked() {
-                                        ctx.copy_text(path_buf.to_string_lossy().to_string());
-                                        is_open = false;
+                    // node filtering logic:
+                    let (nodes_to_draw, edges_to_draw) = {
+                        let scanner_locked = self.scanner.lock().unwrap();
+
+                        match self.current_graph_mode {
+                            GraphMode::Links => {
+                                let nodes: Vec<_> =
+                                    self.file_graph.node_indices.values().cloned().collect();
+
+                                let edges: Vec<_> = self
+                                    .file_graph
+                                    .graph
+                                    .edge_references()
+                                    .map(|e| (e.source(), e.target()))
+                                    .collect();
+                                (nodes, edges)
+                            }
+                            GraphMode::Tags => {
+                                let filtered_tag_nodes: HashMap<_, _> = self
+                                    .tag_graph
+                                    .tag_node_indices
+                                    .iter()
+                                    .filter(|(tag_name, _)| {
+                                        self.tag_filter_input.is_empty()
+                                            || tag_name.contains(&self.tag_filter_input)
+                                    })
+                                    .map(|(tag_name, &node_idx)| (tag_name.clone(), node_idx))
+                                    .collect();
+
+                                let mut nodes = Vec::new();
+                                let mut edges = Vec::new();
+
+                                // Always include all file nodes with tags
+                                nodes.extend(self.tag_graph.file_node_indices.values());
+
+                                // Include images if show_images is true
+                                if self.show_images {
+                                    nodes.extend(self.tag_graph.image_node_indices.values());
+                                }
+
+                                // Include tag nodes that match the filter
+                                for (_, &tag_node_idx) in &filtered_tag_nodes {
+                                    nodes.push(tag_node_idx);
+                                    for edge_ref in self.tag_graph.graph.edges(tag_node_idx) {
+                                        edges.push((edge_ref.source(), edge_ref.target()));
                                     }
                                 }
-                            }
-                        })
-                        .unwrap();
-
-                    if !self.menu_open && window_response.response.clicked_elsewhere() {
-                        is_open = false;
-                    }
-                    self.menu_open = false;
-
-                    if !is_open {
-                        self.open_menu_on_node = None;
-                        self.right_click_menu_pos = None;
-                    }
-                }
-            }
-        });
-
-        egui::SidePanel::right("right_panel").show(ctx, |ui| {
-            ui.heading("Content Preview");
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                enum ContentToRender {
-                    Markdown(String),
-                    Code { content: String, path: PathBuf },
-                    Image(egui::TextureHandle),
-                    None,
-                }
-
-                let content_to_render = match (&self.selected_file_content, self.selected_node) {
-                    (Some(content), Some(node_idx)) => {
-                        let path_str = match self.current_graph_mode {
-                            GraphMode::Links => match &self.file_graph.graph[node_idx] {
-                                GraphNode::File(s) => s,
-                                GraphNode::Tag(_) => return,
-                            },
-                            GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
-                                GraphNode::File(s) => s,
-                                GraphNode::Tag(_) => return,
-                            },
-                        };
-
-                        let path = Path::new(path_str);
-                        if path.extension().map_or(false, |ext| {
-                            let ext = ext.to_string_lossy().to_lowercase();
-                            ext == "md" || ext == "markdown"
-                        }) {
-                            ContentToRender::Markdown(content.clone())
-                        } else {
-                            ContentToRender::Code {
-                                content: content.clone(),
-                                path: path.to_path_buf(),
+                                (nodes, edges)
                             }
                         }
-                    }
-                    (None, _) if self.selected_image.is_some() => {
-                        ContentToRender::Image(self.selected_image.as_ref().unwrap().clone())
-                    }
-                    _ => ContentToRender::None,
-                };
+                    };
 
-                // Now render the content
-                match content_to_render {
-                    ContentToRender::Markdown(content) => {
-                        CommonMarkViewer::new()
-                            .max_image_width(Some(ui.available_width() as usize))
-                            .show(ui, &mut self.markdown_cache, &content);
-                    }
-                    ContentToRender::Code { content, path } => {
-                        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                            if let Some(syntax) = SYNTAX_SET.find_syntax_by_extension(ext) {
-                                self.render_code_block(ui, &content, syntax);
-                            } else {
-                                let mut text = content;
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut text)
-                                        .desired_width(ui.available_width()),
-                                );
-                            }
-                        } else {
-                            let mut text = content;
-                            ui.add(
-                                egui::TextEdit::multiline(&mut text)
-                                    .desired_width(ui.available_width()),
+                    for node_idx in &nodes_to_draw {
+                        if !self.physics_simulator.node_positions.contains_key(node_idx) {
+                            let mut rng = rand::rng();
+                            let random_pos = egui::vec2(
+                                rng.random_range(-100.0..100.0),
+                                rng.random_range(-100.0..100.0),
                             );
+                            self.physics_simulator
+                                .node_positions
+                                .insert(*node_idx, random_pos);
+                            self.physics_simulator
+                                .node_velocities
+                                .insert(*node_idx, egui::Vec2::ZERO);
+                            self.initial_node_layout.insert(*node_idx, random_pos);
                         }
                     }
-                    ContentToRender::Image(texture) => {
-                        ui.vertical_centered(|ui| {
-                            let available_width = ui.available_width() - 20.0;
-                            let img_size = texture.size_vec2();
-                            let ratio = img_size.y / img_size.x;
-                            let desired_height = available_width * ratio;
 
-                            ui.label(format!(
-                                "Image: {}×{}",
-                                img_size.x as i32, img_size.y as i32
+                    self.physics_simulator
+                        .node_positions
+                        .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+                    self.physics_simulator
+                        .node_velocities
+                        .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+                    self.initial_node_layout
+                        .retain(|node_idx, _| nodes_to_draw.contains(node_idx));
+
+                    if self.dragged_node.is_none() {
+                        self.physics_simulator.update(&edges_to_draw);
+                    }
+
+                    for (start_node_idx, end_node_idx) in &edges_to_draw {
+                        if let (Some(&start_pos), Some(&end_pos)) = (
+                            self.physics_simulator.get_node_position(*start_node_idx),
+                            self.physics_simulator.get_node_position(*end_node_idx),
+                        ) {
+                            let start_screen_pos = to_screen.transform_pos(pos2(
+                                start_pos.x * self.graph_zoom_factor + self.graph_center_offset.x,
+                                start_pos.y * self.graph_zoom_factor + self.graph_center_offset.y,
+                            ));
+                            let end_screen_pos = to_screen.transform_pos(pos2(
+                                end_pos.x * self.graph_zoom_factor + self.graph_center_offset.x,
+                                end_pos.y * self.graph_zoom_factor + self.graph_center_offset.y,
                             ));
 
-                            ui.image(&texture);
+                            let stroke = Stroke::new(1.0, Color32::GRAY);
+                            painter.line_segment([start_screen_pos, end_screen_pos], stroke);
+
+                            let vec_between = end_screen_pos - start_screen_pos;
+                            let end_point_for_arrow = start_screen_pos + vec_between * 0.9;
+
+                            let dir = vec_between.normalized();
+                            let arrow_size = 8.0;
+
+                            let arrow_tip1 =
+                                end_point_for_arrow - rotate_vec2(dir, 0.5) * arrow_size;
+                            let arrow_tip2 =
+                                end_point_for_arrow - rotate_vec2(dir, -0.5) * arrow_size;
+
+                            painter.line_segment([end_point_for_arrow, arrow_tip1], stroke);
+                            painter.line_segment([end_point_for_arrow, arrow_tip2], stroke);
+                        }
+                    }
+
+                    for &node_idx in &nodes_to_draw {
+                        if let Some(node_pos_vec2) =
+                            self.physics_simulator.get_node_position(node_idx).cloned()
+                        {
+                            let screen_pos = to_screen.transform_pos(pos2(
+                                node_pos_vec2.x * self.graph_zoom_factor
+                                    + self.graph_center_offset.x,
+                                node_pos_vec2.y * self.graph_zoom_factor
+                                    + self.graph_center_offset.y,
+                            ));
+
+                            let node_name = match self.current_graph_mode {
+                                GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                    GraphNode::File(s) => s.clone(),
+                                    GraphNode::Tag(s) => s.clone(),
+                                },
+                                GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                    GraphNode::File(s) => s.clone(),
+                                    GraphNode::Tag(s) => s.clone(),
+                                },
+                            };
+
+                            let node_radius = 15.0 * self.graph_zoom_factor;
+                            let node_color = if Some(node_idx) == self.selected_node {
+                                Color32::from_rgb(255, 100, 100)
+                            } else if self.search_results.contains(&node_idx) {
+                                Color32::from_rgb(100, 255, 100)
+                            } else {
+                                match self.current_graph_mode {
+                                    GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                        GraphNode::File(path) => {
+                                            let path = Path::new(path);
+                                            let is_image = path
+                                                .extension()
+                                                .map(|ext| {
+                                                    let ext = ext.to_string_lossy().to_lowercase();
+                                                    [
+                                                        "png", "jpg", "jpeg", "gif", "bmp", "webp",
+                                                        "ind",
+                                                    ]
+                                                    .contains(&ext.as_str())
+                                                })
+                                                .unwrap_or(false);
+                                            if is_image {
+                                                Color32::from_rgb(255, 165, 0)
+                                            } else {
+                                                Color32::BLUE
+                                            }
+                                        }
+                                        GraphNode::Tag(_) => Color32::GREEN,
+                                    },
+                                    GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                        GraphNode::File(path) => {
+                                            let scanner_locked = self.scanner.lock().unwrap();
+                                            let has_tags =
+                                                scanner_locked.tags.contains_key(Path::new(path));
+                                            let is_image = Path::new(path)
+                                                .extension()
+                                                .map(|ext| {
+                                                    let ext = ext.to_string_lossy().to_lowercase();
+                                                    ["png", "jpg", "jpeg", "gif", "bmp", "webp"]
+                                                        .contains(&ext.as_str())
+                                                })
+                                                .unwrap_or(false);
+                                            if is_image {
+                                                Color32::from_rgb(255, 165, 0)
+                                            } else if has_tags {
+                                                Color32::BLUE
+                                            } else {
+                                                Color32::GRAY
+                                            }
+                                        }
+                                        GraphNode::Tag(_) => Color32::GREEN,
+                                    },
+                                }
+                            };
+                            // Pulse effect for selected node
+                            let pulse = if Some(node_idx) == self.selected_node {
+                                ctx.input(|i| i.time as f32).sin().abs() * 0.2 + 0.8
+                            } else {
+                                1.0
+                            };
+                            painter.circle_filled(screen_pos, node_radius * pulse, node_color);
+
+                            let display_name = if self.show_full_paths {
+                                node_name.clone()
+                            } else {
+                                PathBuf::from(&node_name).file_name().map_or_else(
+                                    || node_name.clone(),
+                                    |os_str| os_str.to_string_lossy().into_owned(),
+                                )
+                            };
+
+                            let font_id = egui::TextStyle::Body.resolve(ui.style());
+                            let text_galley = ui
+                                .fonts(|f| f.layout_no_wrap(display_name, font_id, Color32::WHITE));
+                            let text_pos =
+                                screen_pos + vec2(-text_galley.size().x / 2.0, node_radius + 5.0);
+                            painter.galley(text_pos, text_galley.clone(), Color32::WHITE);
+
+                            let node_rect = if text_galley.size().y > 0.0 {
+                                egui::Rect::from_center_size(
+                                    screen_pos,
+                                    egui::vec2(
+                                        node_radius * 2.0,
+                                        node_radius * 2.0 + text_galley.size().y,
+                                    ),
+                                )
+                            } else {
+                                egui::Rect::from_center_size(
+                                    screen_pos,
+                                    egui::vec2(node_radius * 2.0, node_radius * 2.0),
+                                )
+                            };
+
+                            let node_response = ui.interact(
+                                node_rect,
+                                ui.id().with(node_idx),
+                                Sense::click_and_drag(),
+                            );
+
+                            if node_response.dragged_by(egui::PointerButton::Primary) {
+                                let delta = node_response.drag_delta() / self.graph_zoom_factor;
+                                self.physics_simulator
+                                    .set_node_position(node_idx, node_pos_vec2 + delta);
+                                self.dragged_node = Some(node_idx);
+                                self.last_drag_pos = Some(node_response.rect.center());
+                            } else if node_response.drag_stopped() {
+                                self.dragged_node = None;
+                                self.last_drag_pos = None;
+                            }
+
+                            // Hover effect for absolute path
+                            if node_response.hovered() {
+                                let full_name = match self.current_graph_mode {
+                                    GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                                        GraphNode::File(file_path_str) => file_path_str.clone(),
+                                        GraphNode::Tag(tag_name) => format!("#{}", tag_name),
+                                    },
+                                    GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                                        GraphNode::File(file_path_str) => file_path_str.clone(),
+                                        GraphNode::Tag(tag_name) => format!("#{}", tag_name),
+                                    },
+                                };
+                                egui::show_tooltip_at(
+                                    ctx,
+                                    egui::LayerId::new(
+                                        egui::Order::Tooltip,
+                                        egui::Id::new("node_tooltip"),
+                                    ),
+                                    egui::Id::new("node_tooltip"),
+                                    node_response.hover_pos().unwrap(),
+                                    |ui| {
+                                        ui.label(full_name);
+                                    },
+                                );
+                            }
+
+                            if node_response.clicked_by(egui::PointerButton::Primary) {
+                                self.selected_node = Some(node_idx);
+                                self.selected_file_content = None; // Clear previous content
+                                self.selected_image = None; // Clear previous image
+
+                                match self.current_graph_mode {
+                                    GraphMode::Links => {
+                                        if let GraphNode::File(file_path_str) =
+                                            &self.file_graph.graph[node_idx]
+                                        {
+                                            self.try_load_file_content(file_path_str.into(), ctx);
+                                        }
+                                    }
+                                    GraphMode::Tags => {
+                                        if let GraphNode::File(file_path_str) =
+                                            &self.tag_graph.graph[node_idx]
+                                        {
+                                            self.try_load_file_content(file_path_str.into(), ctx);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if node_response.clicked_by(egui::PointerButton::Secondary) {
+                                self.open_menu_on_node = Some(node_idx);
+                                self.right_click_menu_pos = node_response.hover_pos();
+                                self.menu_open = true;
+                            }
+                            // Render the custom right-click menu as an egui::Window
+                            if let Some(menu_node_idx) = self.open_menu_on_node {
+                                if let Some(menu_pos) = self.right_click_menu_pos {
+                                    // Use the stored mouse position
+                                    let mut should_close_menu = false;
+
+                                    let window_response = egui::Window::new("Node Actions")
+                                        .id(egui::Id::new("right_click_node_menu")
+                                            .with(menu_node_idx))
+                                        .default_pos(menu_pos)
+                                        .collapsible(false)
+                                        .resizable(false)
+                                        .default_width(200.0)
+                                        .show(ctx, |ui| {
+                                            let full_name_for_menu = match self.current_graph_mode {
+                                                GraphMode::Links => {
+                                                    match &self.file_graph.graph[menu_node_idx] {
+                                                        GraphNode::File(file_path_str) => {
+                                                            file_path_str.clone()
+                                                        }
+                                                        GraphNode::Tag(tag_name) => {
+                                                            format!("Tag: #{}", tag_name)
+                                                        }
+                                                    }
+                                                }
+                                                GraphMode::Tags => {
+                                                    match &self.tag_graph.graph[menu_node_idx] {
+                                                        GraphNode::File(file_path_str) => {
+                                                            file_path_str.clone()
+                                                        }
+                                                        GraphNode::Tag(tag_name) => {
+                                                            format!("Tag: #{}", tag_name)
+                                                        }
+                                                    }
+                                                }
+                                            };
+                                            ui.label(full_name_for_menu);
+                                            ui.separator();
+
+                                            let path_buf_option = match self.current_graph_mode {
+                                                GraphMode::Links => match &self.file_graph.graph
+                                                    [menu_node_idx]
+                                                {
+                                                    GraphNode::File(s) => Some(PathBuf::from(s)),
+                                                    GraphNode::Tag(_) => None,
+                                                },
+                                                GraphMode::Tags => match &self.tag_graph.graph
+                                                    [menu_node_idx]
+                                                {
+                                                    GraphNode::File(s) => Some(PathBuf::from(s)),
+                                                    GraphNode::Tag(_) => None,
+                                                },
+                                            };
+
+                                            if let Some(path_buf) = path_buf_option {
+                                                if path_buf.is_file() {
+                                                    if ui.button("Open File").clicked() {
+                                                        #[cfg(target_os = "linux")]
+                                                        {
+                                                            std::process::Command::new("xdg-open")
+                                                                .arg(&path_buf)
+                                                                .spawn()
+                                                                .expect("Failed to open file");
+                                                        }
+                                                        #[cfg(target_os = "macos")]
+                                                        {
+                                                            std::process::Command::new("open")
+                                                                .arg(&path_buf)
+                                                                .spawn()
+                                                                .expect("Failed to open file");
+                                                        }
+                                                        #[cfg(target_os = "windows")]
+                                                        {
+                                                            std::process::Command::new("cmd")
+                                                                .arg("/C")
+                                                                .arg("start")
+                                                                .arg(&path_buf)
+                                                                .spawn()
+                                                                .expect("Failed to open file");
+                                                        }
+                                                        should_close_menu = true;
+                                                    }
+                                                    if ui.button("Copy Path").clicked() {
+                                                        ctx.copy_text(
+                                                            path_buf.to_string_lossy().to_string(),
+                                                        );
+                                                        should_close_menu = true;
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                    // Check the window's response to see if it was closed
+                                    if window_response.is_none()
+                                        || (window_response.is_some()
+                                            && window_response
+                                                .unwrap()
+                                                .response
+                                                .clicked_elsewhere())
+                                        || should_close_menu
+                                    {
+                                        self.open_menu_on_node = None;
+                                        self.right_click_menu_pos = None;
+                                        self.menu_open = false;
+                                    } else {
+                                        self.menu_open = true;
+                                    }
+                                }
+                            } else {
+                                // If open_menu_on_node is None, ensure menu_open is also false
+                                self.menu_open = false;
+                            }
+                        }
+                    }
+                });
+
+        // Right panel for file content
+        egui::SidePanel::right("file_content_panel")
+            .min_width(200.0)
+            .show(ctx, |ui| {
+                ui.heading("File Content");
+                ui.separator();
+
+                if let Some(content) = &self.selected_file_content {
+                    if self.is_markdown_file() {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            CommonMarkViewer::new().show(ui, &mut self.markdown_cache, content);
+                        });
+                    } else if self.is_code_file() {
+                        let content_clone = content.clone();
+                        self.render_code_with_syntax_highlighting(ui, &content_clone);
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.label(content);
                         });
                     }
-                    ContentToRender::None => {
-                        ui.label("Select a file or image to preview its content.");
-                    }
+                } else if let Some(image) = &self.selected_image {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.image(image);
+                    });
+                } else {
+                    ui.label("Select a file node to view its content.");
                 }
             });
-        });
-        ctx.request_repaint();
     }
 }
 
 impl FileGraphApp {
-    fn perform_search(&mut self) {
-        self.search_results.clear();
-        self.current_search_result = 0;
-
-        let query = self.search_query.to_lowercase();
-        if query.is_empty() {
-            return;
-        }
-
-        let scanner = self.scanner.lock().unwrap();
-        let graph = match self.current_graph_mode {
-            GraphMode::Links => &self.file_graph.graph,
-            GraphMode::Tags => &self.tag_graph.graph,
-        };
-
-        for node_idx in graph.node_indices() {
-            match &graph[node_idx] {
-                GraphNode::File(path) => {
-                    // Search in filename
-                    if path.to_lowercase().contains(&query) {
-                        self.search_results.push(node_idx);
-                        continue;
-                    }
-
-                    // Search in file content
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        if content.to_lowercase().contains(&query) {
-                            self.search_results.push(node_idx);
-                        }
-                    }
-                }
-                GraphNode::Tag(tag) => {
-                    if tag.to_lowercase().contains(&query) {
-                        self.search_results.push(node_idx);
-                    }
-                }
-            }
-        }
-    }
-
-    fn focus_next_search_result(&mut self) {
-        if self.search_results.is_empty() {
-            return;
-        }
-        self.current_search_result = (self.current_search_result + 1) % self.search_results.len();
-        self.focus_on_node(self.search_results[self.current_search_result]);
-    }
-
-    fn focus_prev_search_result(&mut self) {
-        if self.search_results.is_empty() {
-            return;
-        }
-        self.current_search_result = (self.current_search_result + self.search_results.len() - 1)
-            % self.search_results.len();
-        self.focus_on_node(self.search_results[self.current_search_result]);
-    }
-
-    fn focus_on_node(&mut self, node_idx: petgraph::graph::NodeIndex) {
-        if let Some(node_pos) = self.physics_simulator.get_node_position(node_idx) {
-            // Calculate the offset needed to center focused node
-            let screen_center = egui::Vec2::new(
-                self.graph_rect.width() / 2.0,
-                self.graph_rect.height() / 2.0,
-            );
-
-            self.graph_center_offset = screen_center - *node_pos;
-            self.graph_zoom_factor = 1.5;
-        }
-    }
-
-    fn center_graph(&mut self) {
-        self.graph_center_offset = egui::Vec2::ZERO;
-        self.graph_zoom_factor = 1.0;
-    }
-
     pub fn new(scan_dir: PathBuf) -> Self {
-        let current_dir = scan_dir.join("dummy_dir");
-        if !current_dir.exists() {
-            std::fs::create_dir_all(&current_dir).expect("Failed to create dummy_dir");
-        }
+        let scanner = Arc::new(Mutex::new(FileScanner::new(&scan_dir)));
+        let directory_tree = DirectoryNode::build_tree(&scan_dir);
 
-        let current_directory_label = format!("{}", current_dir.display());
-
-        let mut scanner = FileScanner::new(&current_dir);
-        let (sender, _receiver) = std::sync::mpsc::channel();
-        if let Err(e) = scanner.scan_directory_with_progress(&current_dir, sender) {
-            eprintln!("Initial scan error: {}", e);
-        }
-
-        let mut graph = FileGraph::new();
-        graph.build_from_scanner(&scanner);
-
-        let mut tag_graph = TagGraph::new();
-        tag_graph.build_from_tags(&scanner);
-
-        let mut physics_simulator = PhysicsSimulator::new();
-        let mut initial_node_layout = HashMap::new();
-        let mut rng = rand::rng();
-
-        let markdown_syntax = SYNTAX_SET.find_syntax_by_extension("md").cloned();
-        let syntax_cache = HashMap::new();
-
-        for &node_idx in graph.node_indices.values() {
-            let random_pos = egui::vec2(
-                rng.random_range(-100.0..100.0),
-                rng.random_range(-100.0..100.0),
-            );
-            physics_simulator
-                .node_positions
-                .insert(node_idx, random_pos);
-            initial_node_layout.insert(node_idx, random_pos);
-        }
-
-        for &node_idx in tag_graph.file_node_indices.values() {
-            if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos = egui::vec2(
-                    rng.random_range(-100.0..100.0),
-                    rng.random_range(-100.0..100.0),
-                );
-                physics_simulator
-                    .node_positions
-                    .insert(node_idx, random_pos);
-                initial_node_layout.insert(node_idx, random_pos);
-            }
-        }
-
-        for &node_idx in tag_graph.tag_node_indices.values() {
-            if !physics_simulator.node_positions.contains_key(&node_idx) {
-                let random_pos = egui::vec2(
-                    rng.random_range(-100.0..100.0),
-                    rng.random_range(-100.0..100.0),
-                );
-                physics_simulator
-                    .node_positions
-                    .insert(node_idx, random_pos);
-                initial_node_layout.insert(node_idx, random_pos);
-            }
-        }
-
-        physics_simulator.initialize_velocities();
-
-        Self {
-            scan_dir: current_dir,
-            scanner: Arc::new(Mutex::new(scanner)),
-            file_graph: graph,
-            tag_graph,
+        let app = Self {
+            scan_dir: scan_dir.clone(),
+            show_directory_panel: true,
+            directory_tree,
+            selected_directory: Some(scan_dir.clone()),
+            scanner: scanner.clone(),
+            file_graph: FileGraph::new(),
+            tag_graph: TagGraph::new(),
             current_graph_mode: GraphMode::Links,
-            selected_node: None,
-            selected_image: None,
-            selected_file_content: None,
-            tag_filter_input: String::new(),
-            physics_simulator,
-            initial_node_layout,
-            graph_center_offset: egui::Vec2::ZERO,
-            graph_zoom_factor: 1.0,
             show_full_paths: false,
+            physics_simulator: PhysicsSimulator::new(),
             is_scanning: false,
             scan_error: None,
+            selected_node: None,
+            selected_file_content: None,
+            selected_image: None,
+            tag_filter_input: String::new(),
+            initial_node_layout: HashMap::new(),
+            graph_center_offset: egui::Vec2::ZERO,
+            graph_zoom_factor: 1.0,
             dragged_node: None,
             last_drag_pos: None,
-            current_directory_label,
+            current_directory_label: scan_dir.display().to_string(),
             show_images: true,
             // show_orphans: true,
             graph_rect: egui::Rect::NOTHING,
@@ -999,111 +894,332 @@ impl FileGraphApp {
             open_menu_on_node: None,
             right_click_menu_pos: None,
             menu_open: false,
-            syntax_cache,
-            markdown_syntax,
-        }
+            syntax_cache: HashMap::new(),
+            markdown_syntax: SYNTAX_SET.find_syntax_by_extension("md").cloned(),
+        };
+        app
     }
 
-    fn render_code_block(&self, ui: &mut egui::Ui, code: &str, syntax: &SyntaxReference) {
-        let theme = &DEFAULT_THEME;
-        let mut h = HighlightLines::new(syntax, theme);
+    fn scan_selected_directories(&mut self, ctx: &egui::Context) {
+        let mut selected_paths = Vec::new();
+        self.collect_selected_paths(&self.directory_tree, &mut selected_paths);
 
-        egui::ScrollArea::both().show(ui, |ui| {
-            ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-            ui.spacing_mut().item_spacing.y = 0.0;
+        if !selected_paths.is_empty() {
+            self.scan_error = None;
+            self.is_scanning = true;
+            self.scan_progress = 0.0;
+            self.scan_status = "Starting scan...".to_string();
 
-            let mut layout_job = egui::text::LayoutJob::default();
+            let scanner_arc_clone = self.scanner.clone();
+            let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
 
-            for line in LinesWithEndings::from(code) {
-                if let Ok(ranges) = h.highlight_line(line, &SYNTAX_SET) {
-                    for (style, text) in ranges {
-                        let color = style.foreground;
-                        let egui_color = Color32::from_rgb(color.r, color.g, color.b);
-                        layout_job.append(
-                            text,
-                            0.0,
-                            egui::TextFormat {
-                                font_id: egui::FontId::monospace(12.0),
-                                color: egui_color,
-                                ..Default::default()
-                            },
-                        );
+            thread::spawn(move || {
+                let mut scanner = scanner_arc_clone.lock().unwrap();
+                for path in selected_paths {
+                    if let Err(e) =
+                        scanner.scan_directory_with_progress(&path, progress_sender.clone())
+                    {
+                        eprintln!("Error scanning {}: {}", path.display(), e);
                     }
                 }
-            }
+            });
 
-            ui.label(layout_job);
-        });
-    }
-
-    fn render_file_content(&mut self, ui: &mut egui::Ui, content: &str, path: &Path) {
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let ext_lower = ext.to_lowercase();
-
-            // Handle markdown files
-            if ext_lower == "md" || ext_lower == "markdown" {
-                self.render_markdown(ui, content);
-                return;
-            }
-
-            // Handle code files
-            if let Some(syntax) = SYNTAX_SET.find_syntax_by_extension(&ext_lower) {
-                self.render_code_block(ui, content, syntax);
-                return;
-            }
+            self.scan_progress_receiver = Some(progress_receiver);
+        } else {
+            // Show warning if no directories selected
+            self.scan_error = Some("No directories selected for scanning".to_string());
         }
-
-        // Fallback to plain text
-        let mut text = content.to_string();
-        ui.add(egui::TextEdit::multiline(&mut text).desired_width(ui.available_width()));
     }
 
-    fn render_markdown(&mut self, ui: &mut egui::Ui, content: &str) {
-        let mut in_code_block = false;
-        let mut current_lang = "";
-        let mut code_block_content = String::new();
+    fn collect_selected_paths(&self, node: &DirectoryNode, paths: &mut Vec<PathBuf>) {
+        if node.selected {
+            paths.push(node.path.clone());
+        }
+        for child in &node.children {
+            self.collect_selected_paths(child, paths);
+        }
+    }
+    fn try_load_file_content(&mut self, path: PathBuf, ctx: &egui::Context) {
+        let file_extension = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
 
-        for line in content.lines() {
-            if line.starts_with("```") {
-                if in_code_block {
-                    if let Some(syntax) = self.get_syntax_for_language(current_lang) {
-                        self.render_code_block(ui, &code_block_content, syntax);
-                    } else {
-                        // Fallback to plain text for unknown languages
-                        let mut text = code_block_content.clone();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut text)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(ui.available_width()),
-                        );
-                    }
-                    code_block_content.clear();
-                    in_code_block = false;
-                } else {
-                    current_lang = line.trim_start_matches("```").trim();
-                    in_code_block = true;
+        if ["png", "jpg", "jpeg", "gif", "bmp", "webp"].contains(&file_extension.as_str()) {
+            match image::open(&path) {
+                Ok(img) => {
+                    let rgba_image = img.into_rgba8();
+                    let pixels: Vec<u8> = rgba_image.as_flat_samples().as_slice().to_vec();
+                    let image_size = [rgba_image.width() as _, rgba_image.height() as _];
+                    let image_data = egui::ColorImage::from_rgba_unmultiplied(image_size, &pixels);
+                    self.selected_image = Some(ctx.load_texture(
+                        // Use ctx instead of frame.ctx()
+                        path.to_string_lossy(),
+                        image_data,
+                        Default::default(),
+                    ));
+                    self.selected_file_content = None;
                 }
-            } else if in_code_block {
-                code_block_content.push_str(line);
-                code_block_content.push('\n');
-            } else {
-                CommonMarkViewer::new()
-                    .max_image_width(Some(ui.available_width() as usize))
-                    .show(ui, &mut self.markdown_cache, line);
+                Err(e) => {
+                    self.selected_file_content = Some(format!("Failed to load image: {}", e));
+                    self.selected_image = None;
+                }
+            }
+        } else {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    self.selected_file_content = Some(content);
+                    self.selected_image = None;
+                }
+                Err(e) => {
+                    self.selected_file_content = Some(format!("Failed to read file: {}", e));
+                    self.selected_image = None;
+                }
+            }
+        }
+    }
+
+    fn render_directory_tree_node(ui: &mut egui::Ui, node: &mut DirectoryNode) -> bool {
+        let mut changed = false;
+        let label = node.path.file_name().unwrap().to_string_lossy().to_string();
+
+        // Render selectable directory node
+        let response = ui.selectable_label(node.selected, label);
+
+        if response.clicked() {
+            node.selected = !node.selected;
+            changed = true;
+        }
+
+        if node.selected || node.expanded {
+            ui.indent("dir_indent", |ui| {
+                for child in &mut node.children {
+                    if Self::render_directory_tree_node(ui, child) {
+                        changed = true;
+                    }
+                }
+            });
+        }
+
+        changed
+    }
+
+    fn focus_on_node(&mut self, node_idx: NodeIndex) {
+        if let Some(&node_pos) = self.physics_simulator.get_node_position(node_idx) {
+            let current_center_offset = self.graph_center_offset;
+            let target_center_offset = -node_pos; // Center the node at (0,0) in graph coordinates
+            self.graph_center_offset = target_center_offset;
+            self.graph_zoom_factor = 1.0; // Reset zoom to default
+        }
+    }
+
+    fn center_graph(&mut self) {
+        self.graph_center_offset = egui::Vec2::ZERO;
+        self.graph_zoom_factor = 1.0;
+    }
+
+    fn perform_search(&mut self) {
+        self.search_results.clear();
+        self.current_search_result = 0;
+
+        let query_lower = self.search_query.to_lowercase();
+        if query_lower.is_empty() {
+            return;
+        }
+
+        let graph_to_search = match self.current_graph_mode {
+            GraphMode::Links => &self.file_graph.graph,
+            GraphMode::Tags => &self.tag_graph.graph,
+        };
+
+        for node_idx in graph_to_search.node_indices() {
+            let node_name = match &graph_to_search[node_idx] {
+                GraphNode::File(s) => PathBuf::from(s)
+                    .file_name()
+                    .map_or_else(|| s.clone(), |os_str| os_str.to_string_lossy().into_owned()),
+                GraphNode::Tag(s) => s.clone(),
+            };
+            if node_name.to_lowercase().contains(&query_lower) {
+                self.search_results.push(node_idx);
             }
         }
 
-        if in_code_block && !code_block_content.is_empty() {
-            if let Some(syntax) = self.get_syntax_for_language(current_lang) {
-                self.render_code_block(ui, &code_block_content, syntax);
+        if !self.search_results.is_empty() {
+            self.selected_node = Some(self.search_results[0]);
+            self.focus_on_node(self.search_results[0]);
+        }
+    }
+
+    fn focus_next_search_result(&mut self) {
+        if self.search_results.is_empty() {
+            return;
+        }
+        self.current_search_result = (self.current_search_result + 1) % self.search_results.len();
+        self.selected_node = Some(self.search_results[self.current_search_result]);
+        self.focus_on_node(self.search_results[self.current_search_result]);
+    }
+
+    fn focus_prev_search_result(&mut self) {
+        if self.search_results.is_empty() {
+            return;
+        }
+        if self.current_search_result == 0 {
+            self.current_search_result = self.search_results.len() - 1;
+        } else {
+            self.current_search_result -= 1;
+        }
+        self.selected_node = Some(self.search_results[self.current_search_result]);
+        self.focus_on_node(self.search_results[self.current_search_result]);
+    }
+
+    fn is_markdown_file(&self) -> bool {
+        if let Some(node_idx) = self.selected_node {
+            let graph = match self.current_graph_mode {
+                GraphMode::Links => &self.file_graph.graph,
+                GraphMode::Tags => &self.tag_graph.graph,
+            };
+            if let GraphNode::File(file_path_str) = &graph[node_idx] {
+                return PathBuf::from(file_path_str)
+                    .extension()
+                    .map(|ext| ext.to_str().unwrap_or("").to_lowercase() == "md")
+                    .unwrap_or(false);
+            }
+        }
+        false
+    }
+
+    fn is_code_file(&self) -> bool {
+        if let Some(node_idx) = self.selected_node {
+            let graph = match self.current_graph_mode {
+                GraphMode::Links => &self.file_graph.graph,
+                GraphMode::Tags => &self.tag_graph.graph,
+            };
+            if let GraphNode::File(file_path_str) = &graph[node_idx] {
+                let path = PathBuf::from(file_path_str);
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    return ["rs", "py", "c", "cpp", "h", "js", "html", "css", "sh"]
+                        .contains(&ext_lower.as_str());
+                }
+            }
+        }
+        false
+    }
+
+    fn render_code_with_syntax_highlighting(&mut self, ui: &mut egui::Ui, _code_content: &str) {
+        let content = if let Some(content) = &self.selected_file_content {
+            content.clone()
+        } else {
+            return;
+        };
+
+        if let Some(node_idx) = self.selected_node {
+            let graph = match self.current_graph_mode {
+                GraphMode::Links => &self.file_graph.graph,
+                GraphMode::Tags => &self.tag_graph.graph,
+            };
+            let file_path_str = if let GraphNode::File(s) = &graph[node_idx] {
+                s
             } else {
-                let mut text = code_block_content;
+                return;
+            };
+
+            let path = PathBuf::from(file_path_str);
+            let lang = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let syntax = self.get_syntax_for_language(&lang);
+
+            if let Some(syntax_ref) = syntax {
+                let mut h = HighlightLines::new(syntax_ref, *DEFAULT_THEME);
+                let mut layouter = |ui: &egui::Ui, text: &str, _wrap_width: f32| {
+                    let mut job = egui::text::LayoutJob::default();
+                    for line in LinesWithEndings::from(text) {
+                        let ranges = h.highlight_line(line, &SYNTAX_SET).unwrap();
+                        for (style, text) in ranges {
+                            let color = style.foreground;
+                            let egui_color = egui::Color32::from_rgb(color.r, color.g, color.b);
+                            job.append(
+                                text,
+                                0.0,
+                                egui::TextFormat {
+                                    font_id: egui::TextStyle::Monospace.resolve(ui.style()),
+                                    color: egui_color,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                    ui.fonts(|f| f.layout_job(job))
+                };
+
+                let mut text = content;
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(ui.available_width())
+                        .interactive(false)
+                        .layouter(&mut layouter),
+                );
+            } else {
+                let mut text = content;
                 ui.add(
                     egui::TextEdit::multiline(&mut text)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(ui.available_width()),
                 );
             }
+        }
+    }
+
+    fn render_code_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        code_block_content: &str,
+        syntax: Option<&SyntaxReference>,
+    ) {
+        if let Some(syntax_ref) = syntax {
+            let mut h = HighlightLines::new(syntax_ref, *DEFAULT_THEME);
+            let mut layouter = |ui: &egui::Ui, text: &str, _wrap_width: f32| {
+                let mut job = egui::text::LayoutJob::default();
+                for line in LinesWithEndings::from(text) {
+                    let ranges = h.highlight_line(line, &SYNTAX_SET).unwrap();
+                    for (style, text) in ranges {
+                        let color = style.foreground;
+                        let egui_color = egui::Color32::from_rgb(color.r, color.g, color.b);
+                        job.append(
+                            text,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::TextStyle::Monospace.resolve(ui.style()),
+                                color: egui_color,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+                ui.fonts(|f| f.layout_job(job))
+            };
+
+            let mut text = code_block_content.to_string();
+            ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(ui.available_width())
+                    .interactive(false)
+                    .layouter(&mut layouter),
+            );
+        } else {
+            let mut text = code_block_content.to_string();
+            ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(ui.available_width()),
+            );
         }
     }
 
@@ -1125,8 +1241,8 @@ impl FileGraphApp {
     }
 }
 
-fn rotate_vec2(vec: egui::Vec2, angle: f32) -> egui::Vec2 {
-    let cos_a = angle.cos();
-    let sin_a = angle.sin();
+fn rotate_vec2(vec: egui::Vec2, angle_radians: f32) -> egui::Vec2 {
+    let cos_a = angle_radians.cos();
+    let sin_a = angle_radians.sin();
     egui::vec2(vec.x * cos_a - vec.y * sin_a, vec.x * sin_a + vec.y * cos_a)
 }

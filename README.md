@@ -40,6 +40,7 @@ cargo run --release -- /path/to/your/directory
 - [ ] Fix Focus on Node (re-center and zoom on selected node)
 - [ ] Graph mode link and tag in one with toggle
 - [ ] Graph Search `Next` and `Previous` buttons are doing unexpected behavior
+- [ ] Context menu unexpected behavior
 
 - [ ] **Graph Interaction and Visualization Enhancements:**
   - [ ] Colors based on file type/tags
