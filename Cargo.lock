@@ -14,6 +14,7 @@ dependencies = [
  "once_cell",
  "petgraph",
  "rand 0.9.1",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

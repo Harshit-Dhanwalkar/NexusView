@@ -40,6 +40,15 @@ struct DirectoryNode {
     selected: bool,
 }
 
+#[derive(Debug, PartialEq)]
+enum AppState {
+    Idle,
+    Scanning,
+    BuildingGraph,
+    Ready,
+    Error(String),
+}
+
 impl DirectoryNode {
     fn new(path: PathBuf) -> Self {
         Self {
@@ -138,10 +147,34 @@ pub struct FileGraphApp {
     menu_open: bool,
     syntax_cache: HashMap<String, SyntaxReference>,
     markdown_syntax: Option<SyntaxReference>,
+    scan_thread_handle: Option<thread::JoinHandle<()>>,
+    cancel_sender: Option<std::sync::mpsc::Sender<()>>,
+    state: AppState,
 }
 
 impl App for FileGraphApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_ui_state(ctx);
+        match self.state {
+            AppState::Ready => {
+                // Normal UI rendering
+            }
+
+            AppState::Error(ref err) => {
+                let error_message = err.clone();
+                egui::Window::new("Error")
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.label(error_message);
+                        if ui.button("Retry").clicked() {
+                            self.state = AppState::Idle;
+                        }
+                    });
+            }
+            _ => {}
+        }
+
         // Check for scan progress updates
         if let Some(receiver) = self.scan_progress_receiver.take() {
             while let Ok((progress, status)) = receiver.try_recv() {
@@ -1188,6 +1221,9 @@ impl FileGraphApp {
             syntax_cache: HashMap::new(),
             markdown_syntax: SYNTAX_SET.find_syntax_by_extension("md").cloned(),
             show_content_panel: true,
+            cancel_sender: None,
+            scan_thread_handle: None,
+            state: AppState::Idle,
         };
 
         if let Some(initial_scan_path) = app.selected_directory.clone() {
@@ -1197,64 +1233,169 @@ impl FileGraphApp {
         app
     }
 
+    // fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
+    //     // Clean up any previous scan
+    //     self.cancel_scan();
+    //
+    //     // Early return checks
+    //     if self.is_scanning {
+    //         eprintln!("Already scanning, ignoring new scan request.");
+    //         return;
+    //     }
+    //
+    //     // Validate path
+    //     if !path_to_scan.is_dir() {
+    //         self.scan_error = Some("Selected path is not a directory".to_string());
+    //         return;
+    //     }
+    //
+    //     // Update UI state
+    //     self.is_scanning = true;
+    //     self.scan_progress = 0.0;
+    //     self.scan_status = format!("Scanning: {}", path_to_scan.display());
+    //     self.current_scan_dir = path_to_scan.clone();
+    //     self.scan_error = None;
+    //     self.current_directory_label = path_to_scan.display().to_string();
+    //
+    //     // Clear old data
+    //     self.clear_graph_data();
+    //
+    //     // Create communication channels
+    //     let (cancel_sender, cancel_receiver) = std::sync::mpsc::channel();
+    //     let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
+    //
+    //     // Store the sender for potential cancellation
+    //     self.cancel_sender = Some(cancel_sender);
+    //     self.scan_sender = Some(progress_sender.clone());
+    //     self.scan_progress_receiver = Some(progress_receiver);
+    //
+    //     // Clone necessary values for the thread
+    //     let scanner_arc_clone = self.scanner.clone();
+    //     let ctx_clone = ctx.clone();
+    //     let show_hidden_clone = self.show_hidden_files;
+    //
+    //     // Spawn scanning thread
+    //     self.scan_thread_handle = Some(thread::spawn(move || {
+    //         let scan_start_time = Instant::now();
+    //         let mut last_progress_update = Instant::now();
+    //
+    //         // Check for cancellation before starting
+    //         if cancel_receiver.try_recv().is_ok() {
+    //             return;
+    //         }
+    //
+    //         match scanner_arc_clone.lock() {
+    //             Ok(mut scanner_guard) => {
+    //                 scanner_guard.set_show_hidden(show_hidden_clone);
+    //
+    //                 // Main scanning loop with periodic cancellation checks
+    //                 match scanner_guard.scan_directory_with_progress(&path_to_scan, progress_sender)
+    //                 {
+    //                     Ok(_) => {
+    //                         println!("Scan completed in {:?}", scan_start_time.elapsed());
+    //                     }
+    //                     Err(e) => {
+    //                         eprintln!("Scan error: {}", e);
+    //                     }
+    //                 }
+    //             }
+    //             Err(e) => {
+    //                 eprintln!("Failed to lock scanner: {}", e);
+    //             }
+    //         }
+    //
+    //         ctx_clone.request_repaint();
+    //     }));
+    // }
     fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
-        // Early return checks
-        if self.is_scanning {
+        self.cancel_scan();
+
+        if self.state == AppState::Scanning {
             eprintln!("Already scanning, ignoring new scan request.");
             return;
         }
 
-        // Validate path
         if !path_to_scan.is_dir() {
-            self.scan_error = Some("Selected path is not a directory".to_string());
+            self.state = AppState::Error("Selected path is not a directory".to_string());
             return;
         }
 
-        // Update UI state
-        self.is_scanning = true;
+        self.state = AppState::Scanning;
         self.scan_progress = 0.0;
         self.scan_status = format!("Scanning: {}", path_to_scan.display());
         self.current_scan_dir = path_to_scan.clone();
         self.scan_error = None;
         self.current_directory_label = path_to_scan.display().to_string();
 
-        // Clear old data
         self.clear_graph_data();
 
-        // Prepare for new scan
-        let scanner_arc_clone = self.scanner.clone();
+        let (cancel_sender, cancel_receiver) = std::sync::mpsc::channel();
         let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
-        self.scan_sender = Some(progress_sender.clone());
+
+        self.cancel_sender = Some(cancel_sender);
         self.scan_progress_receiver = Some(progress_receiver);
 
+        let scanner_arc_clone = self.scanner.clone();
         let ctx_clone = ctx.clone();
         let show_hidden_clone = self.show_hidden_files;
 
-        // Spawn scanning thread
-        thread::spawn(move || {
-            let scan_start_time = Instant::now();
+        self.scan_thread_handle = Some(thread::spawn(move || {
+            if cancel_receiver.try_recv().is_ok() {
+                return;
+            }
 
             match scanner_arc_clone.lock() {
                 Ok(mut scanner_guard) => {
                     scanner_guard.set_show_hidden(show_hidden_clone);
-
                     match scanner_guard.scan_directory_with_progress(&path_to_scan, progress_sender)
                     {
-                        Ok(_) => {
-                            println!("Scan completed in {:?}", scan_start_time.elapsed());
-                        }
-                        Err(e) => {
-                            eprintln!("Scan error: {}", e);
-                        }
+                        Ok(_) => println!("Scan completed successfully"),
+                        Err(e) => eprintln!("Scan error: {}", e),
                     }
                 }
-                Err(e) => {
-                    eprintln!("Failed to lock scanner: {}", e);
-                }
+                Err(e) => eprintln!("Failed to lock scanner: {}", e),
             }
 
             ctx_clone.request_repaint();
-        });
+        }));
+    }
+
+    // fn cancel_scan(&mut self) {
+    //     // Send cancellation signal
+    //     if let Some(sender) = self.cancel_sender.take() {
+    //         let _ = sender.send(());
+    //     }
+    //
+    //     // Wait for thread to finish
+    //     if let Some(handle) = self.scan_thread_handle.take() {
+    //         match handle.join() {
+    //             Ok(_) => {
+    //                 self.is_scanning = false;
+    //                 self.scan_status = "Scan cancelled".to_string();
+    //             }
+    //             Err(e) => {
+    //                 eprintln!("Error joining scan thread: {:?}", e);
+    //                 self.scan_error = Some("Failed to properly cancel scan".to_string());
+    //             }
+    //         }
+    //     }
+    // }
+    fn cancel_scan(&mut self) {
+        if let Some(sender) = self.cancel_sender.take() {
+            let _ = sender.send(());
+        }
+
+        if let Some(handle) = self.scan_thread_handle.take() {
+            match handle.join() {
+                Ok(_) => {
+                    self.state = AppState::Idle;
+                    self.scan_status = "Scan cancelled".to_string();
+                }
+                Err(e) => {
+                    self.state = AppState::Error(format!("Failed to cancel scan: {:?}", e));
+                }
+            }
+        }
     }
 
     // Helper function to clear graph data
@@ -1280,21 +1421,62 @@ impl FileGraphApp {
         self.current_search_result = 0;
     }
 
-    fn build_graphs(&mut self) {
+    fn update_ui_state(&mut self, ctx: &egui::Context) {
+        match self.state {
+            AppState::Scanning => {
+                if let Some(receiver) = &self.scan_progress_receiver {
+                    if let Ok((progress, status)) = receiver.try_recv() {
+                        self.scan_progress = progress;
+                        self.scan_status = status;
+                        if progress >= 1.0 {
+                            self.state = AppState::BuildingGraph;
+                            if let Err(e) = self.build_graphs() {
+                                self.state = AppState::Error(e);
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+            }
+            AppState::BuildingGraph => {
+                if self.graph_build_progress >= 1.0 {
+                    self.state = AppState::Ready;
+                    ctx.request_repaint();
+                }
+            }
+            AppState::Ready | AppState::Idle | AppState::Error(_) => {
+                // No special handling needed for these states in this method
+            }
+        }
+    }
+
+    fn build_graphs(&mut self) -> Result<(), String> {
         self.graph_build_progress = 0.0;
         self.graph_build_status = "Building graphs...".to_string();
 
-        let scanner_guard = self
-            .scanner
-            .lock()
-            .expect("Failed to lock scanner for graph build");
+        let scanner_guard = match self.scanner.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err("Failed to lock scanner".to_string()),
+        };
+
+        // Clear old graphs before rebuilding
+        self.file_graph.graph.clear();
+        self.file_graph.node_indices.clear();
         self.file_graph.build_from_scanner(&scanner_guard);
+
+        self.graph_build_progress = 0.5;
+        self.graph_build_status = "Building tag graph...".to_string();
+
+        // Clear old tag graph before rebuilding
+        self.tag_graph.graph.clear();
+        self.tag_graph.file_node_indices.clear();
+        self.tag_graph.tag_node_indices.clear();
+        self.tag_graph.image_node_indices.clear();
         self.tag_graph.build_from_tags(&scanner_guard);
-        drop(scanner_guard); // Release lock
 
         // Calculate initial layout for physics simulation
         self.initial_node_layout.clear();
-        let mut rng = rand::rng();
+        let mut rng = rand::rngs::ThreadRng::default();
         let graph_center = self.graph_rect.center();
         let radius = self.graph_rect.width().min(self.graph_rect.height()) / 3.0;
 
@@ -1308,7 +1490,7 @@ impl FileGraphApp {
         }
 
         for (node_idx, _) in &all_node_indices {
-            let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+            let angle = rng.random_range(0.0..std::f32::consts::TAU);
             let x = graph_center.x + radius * angle.cos();
             let y = graph_center.y + radius * angle.sin();
             self.initial_node_layout.insert(*node_idx, egui::vec2(x, y));
@@ -1318,7 +1500,9 @@ impl FileGraphApp {
         self.physics_simulator.initialize_velocities();
 
         self.graph_build_progress = 1.0;
-        self.graph_build_status = "Graphs built.".to_string();
+        self.graph_build_status = "Graph ready".to_string();
+
+        Ok(())
     }
 
     fn draw_directory_node_recursive(

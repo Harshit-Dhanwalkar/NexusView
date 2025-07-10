@@ -1,6 +1,7 @@
 // src/physics_nodes.rs
 use egui::Vec2;
 use petgraph::graph::NodeIndex;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,6 +28,7 @@ pub struct PhysicsSimulator {
     pub ideal_edge_length: f32,
     pub time_step: f32,
     pub friction: f32,
+    pub frozen: bool,
 }
 
 impl PhysicsSimulator {
@@ -40,6 +42,7 @@ impl PhysicsSimulator {
             ideal_edge_length: 180.0,
             time_step: 0.3,
             friction: 0.4,
+            frozen: false,
         }
     }
 
@@ -50,57 +53,77 @@ impl PhysicsSimulator {
     }
 
     pub fn update(&mut self, edges: &[(NodeIndex, NodeIndex)]) {
-        let mut node_forces: HashMap<NodeIndex, Vec2> = HashMap::new();
+        if self.frozen {
+            return;
+        }
+
+        let node_indices: Vec<_> = self.node_positions.keys().copied().collect();
+        let mut forces: HashMap<NodeIndex, Vec2> = HashMap::new();
 
         // Initialize forces to zero
-        for node in self.node_positions.keys() {
-            node_forces.insert(*node, Vec2::ZERO);
+        for &node in &node_indices {
+            forces.insert(node, Vec2::ZERO);
         }
 
-        // Calculate spring forces
-        for (node1, node2) in edges {
-            if let (Some(&pos1), Some(&pos2)) = (
-                self.node_positions.get(node1),
-                self.node_positions.get(node2),
-            ) {
-                let delta = Vec2::new(pos2.x - pos1.x, pos2.y - pos1.y);
-                let distance = delta.length().max(0.1);
-                let displacement = distance - self.ideal_edge_length;
+        // Parallel force calculation
+        let (spring_forces, repulsion_forces) = rayon::join(
+            || {
+                let mut spring_forces = HashMap::new();
+                for &(node1, node2) in edges {
+                    if let (Some(&pos1), Some(&pos2)) = (
+                        self.node_positions.get(&node1),
+                        self.node_positions.get(&node2),
+                    ) {
+                        let delta = Vec2::new(pos2.x - pos1.x, pos2.y - pos1.y);
+                        let distance = delta.length().max(0.1);
+                        let displacement = distance - self.ideal_edge_length;
 
-                let force_magnitude = self.spring_constant * displacement;
-                let spring_force = (delta / distance) * force_magnitude;
+                        let force_magnitude = self.spring_constant * displacement;
+                        let spring_force = (delta / distance) * force_magnitude;
 
-                *node_forces.entry(*node1).or_default() += spring_force;
-                *node_forces.entry(*node2).or_default() -= spring_force;
-            }
-        }
-
-        // Calculate repulsion forces
-        let node_indices: Vec<NodeIndex> = self.node_positions.keys().cloned().collect();
-        for i in 0..node_indices.len() {
-            for j in (i + 1)..node_indices.len() {
-                let node1 = node_indices[i];
-                let node2 = node_indices[j];
-
-                if let (Some(&pos1), Some(&pos2)) = (
-                    self.node_positions.get(&node1),
-                    self.node_positions.get(&node2),
-                ) {
-                    let delta = Vec2::new(pos2.x - pos1.x, pos2.y - pos1.y);
-                    let distance_sq = delta.length_sq();
-                    let distance = distance_sq.sqrt().max(0.1);
-
-                    let repulsion_force =
-                        (delta / distance) * (self.repulsion_constant / distance_sq.max(10.0));
-
-                    *node_forces.entry(node1).or_default() -= repulsion_force;
-                    *node_forces.entry(node2).or_default() += repulsion_force;
+                        *spring_forces.entry(node1).or_insert(Vec2::ZERO) += spring_force;
+                        *spring_forces.entry(node2).or_insert(Vec2::ZERO) -= spring_force;
+                    }
                 }
-            }
+                spring_forces
+            },
+            || {
+                let mut repulsion_forces = HashMap::new();
+                for i in 0..node_indices.len() {
+                    for j in (i + 1)..node_indices.len() {
+                        let node1 = node_indices[i];
+                        let node2 = node_indices[j];
+
+                        if let (Some(&pos1), Some(&pos2)) = (
+                            self.node_positions.get(&node1),
+                            self.node_positions.get(&node2),
+                        ) {
+                            let delta = Vec2::new(pos2.x - pos1.x, pos2.y - pos1.y);
+                            let distance_sq = delta.length_sq();
+                            let distance = distance_sq.sqrt().max(0.1);
+
+                            let repulsion_force = (delta / distance)
+                                * (self.repulsion_constant / distance_sq.max(10.0));
+
+                            *repulsion_forces.entry(node1).or_insert(Vec2::ZERO) -= repulsion_force;
+                            *repulsion_forces.entry(node2).or_insert(Vec2::ZERO) += repulsion_force;
+                        }
+                    }
+                }
+                repulsion_forces
+            },
+        );
+
+        // Combine all forces
+        for (node, force) in spring_forces {
+            *forces.entry(node).or_default() += force;
+        }
+        for (node, force) in repulsion_forces {
+            *forces.entry(node).or_default() += force;
         }
 
         // Update velocities and positions
-        for (node_idx, force) in node_forces {
+        for (node_idx, force) in forces {
             if let (Some(pos), Some(vel)) = (
                 self.node_positions.get_mut(&node_idx),
                 self.node_velocities.get_mut(&node_idx),
