@@ -56,6 +56,7 @@ cargo run --release -- /path/to/your/directory
 - [ ] "Freeze" Physics (button to pause simulation)
 - [x] Toggle hidden files (`.file` and `.dir`)
 - [ ] Fix toggle hidden files whole `pwd` is being rescanned not `selected directory`
+- [ ] Fix text luminance
 
 ### Data & Content
 

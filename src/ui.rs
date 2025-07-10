@@ -11,9 +11,11 @@ use std::time::Instant;
 use crate::file_scan::FileScanner;
 use crate::graph::{FileGraph, GraphNode, TagGraph};
 use crate::physics_nodes::PhysicsSimulator;
-use crate::utils::{is_code_path, is_image_path, is_markdown_path, rotate_vec2};
+use crate::utils::{is_code_path, is_image_path, is_markdown_path, is_pdf_path, rotate_vec2};
 use egui::{Color32, Sense, Stroke, pos2, vec2};
 use once_cell::sync::Lazy;
+use pdf::file::{File, Trailer};
+use pdf::primitive::PdfString;
 use petgraph::visit::EdgeRef;
 use rand::Rng;
 use syntect::easy::HighlightLines;
@@ -739,11 +741,14 @@ impl App for FileGraphApp {
                                             if is_image {
                                                 Color32::from_rgb(255, 165, 0) // Orange for images
                                             } else if is_markdown_path(path) {
-                                                Color32::from_rgb(100, 200, 255) // Blue for markdown
+                                                Color32::from_rgb(100, 200, 255)
+                                            // Blue for markdown
                                             } else if is_code_path(path) {
-                                                Color32::from_rgb(150, 100, 255) // Purple for code
+                                                Color32::from_rgb(150, 100, 255)
+                                            // Purple for code
                                             } else {
-                                                Color32::from_rgb(100, 200, 150) // Teal for other files
+                                                Color32::from_rgb(100, 200, 150)
+                                                // Teal for other files
                                             }
                                         }
                                         GraphNode::Tag(_) => Color32::from_rgb(255, 100, 150), // Pink for tags
@@ -757,9 +762,11 @@ impl App for FileGraphApp {
                                             if is_image {
                                                 Color32::from_rgb(255, 165, 0) // Orange for images
                                             } else if has_tags {
-                                                Color32::from_rgb(100, 200, 255) // Blue for tagged files
+                                                Color32::from_rgb(100, 200, 255)
+                                            // Blue for tagged files
                                             } else {
-                                                Color32::from_rgb(100, 100, 100) // Gray for untagged files
+                                                Color32::from_rgb(100, 100, 100)
+                                                // Gray for untagged files
                                             }
                                         }
                                         GraphNode::Tag(_) => Color32::from_rgb(255, 100, 150), // Pink for tags
@@ -844,28 +851,29 @@ impl App for FileGraphApp {
                                 }
                             };
 
-                            let text_galley =
-                                ui.fonts(|f| f.layout_no_wrap(display_name, font_id, text_color));
+                            let text_galley = ui
+                                .fonts(|f| f.layout_no_wrap(display_name, font_id, Color32::WHITE));
 
-                            // Text background for better readability
-                            let text_bg_rect = egui::Rect::from_center_size(
-                                screen_pos
-                                    + vec2(0.0, node_radius + 5.0 + text_galley.size().y / 2.0),
-                                text_galley.size() + vec2(8.0, 4.0),
-                            );
-                            painter.rect_filled(text_bg_rect, 4.0, Color32::from_black_alpha(200));
-                            painter.galley(
-                                text_bg_rect.center() - text_galley.size() / 2.0,
-                                text_galley.clone(),
-                                text_color,
-                            );
+                            let text_size = text_galley.size();
 
-                            let node_rect = if text_galley.size().y > 0.0 {
+                            let text_pos = screen_pos + vec2(0.0, node_radius + 5.0);
+                            let text_bg_rect = egui::Rect::from_min_size(
+                                text_pos - vec2(4.0, 0.0),
+                                text_size + vec2(8.0, 0.0), // padding
+                            );
+                            painter.rect_filled(
+                                text_bg_rect,
+                                2.0,                            // corner radius
+                                Color32::from_black_alpha(120), // transparency
+                            );
+                            painter.galley(text_pos, text_galley, Color32::WHITE);
+
+                            let node_rect = if text_size.y > 0.0 {
                                 egui::Rect::from_center_size(
                                     screen_pos,
                                     egui::vec2(
                                         node_radius * 2.0,
-                                        node_radius * 2.0 + text_galley.size().y,
+                                        node_radius * 2.0 + text_size.y + 5.0,
                                     ),
                                 )
                             } else {
@@ -1109,7 +1117,7 @@ impl App for FileGraphApp {
                     }
                 });
 
-        // Right panel for file content
+        // In the right panel section of the update method:
         egui::SidePanel::right("file_content_panel")
             .min_width(200.0)
             .show_animated(ctx, self.show_content_panel, |ui| {
@@ -1152,6 +1160,8 @@ impl App for FileGraphApp {
                     } else if self.is_code_file() {
                         let content_clone = content.clone();
                         self.render_code_with_syntax_highlighting(ui, &content_clone);
+                    } else if self.is_pdf_file() {
+                        self.render_pdf_preview(ui);
                     } else {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             ui.label(content);
@@ -1595,13 +1605,10 @@ impl FileGraphApp {
     }
 
     fn try_load_file_content(&mut self, path: PathBuf, ctx: &egui::Context) {
-        let file_extension = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        if ["png", "jpg", "jpeg", "gif", "bmp", "webp"].contains(&file_extension.as_str()) {
+        if is_pdf_path(&path) {
+            self.selected_file_content = Some(path.display().to_string());
+            self.selected_image = None;
+        } else if is_image_path(&path) {
             match image::open(&path) {
                 Ok(img) => {
                     let rgba_image = img.into_rgba8();
@@ -1609,7 +1616,6 @@ impl FileGraphApp {
                     let image_size = [rgba_image.width() as _, rgba_image.height() as _];
                     let image_data = egui::ColorImage::from_rgba_unmultiplied(image_size, &pixels);
                     self.selected_image = Some(ctx.load_texture(
-                        // Use ctx instead of frame.ctx()
                         path.to_string_lossy(),
                         image_data,
                         Default::default(),
@@ -1759,6 +1765,92 @@ impl FileGraphApp {
             }
         }
         false
+    }
+
+    fn is_pdf_file(&self) -> bool {
+        if let Some(node_idx) = self.selected_node {
+            let graph = match self.current_graph_mode {
+                GraphMode::Links => &self.file_graph.graph,
+                GraphMode::Tags => &self.tag_graph.graph,
+            };
+            if let GraphNode::File(file_path_str) = &graph[node_idx] {
+                return is_pdf_path(Path::new(file_path_str));
+            }
+        }
+        false
+    }
+
+    fn render_pdf_preview(&mut self, ui: &mut egui::Ui) {
+        if let Some(node_idx) = self.selected_node {
+            let graph = match self.current_graph_mode {
+                GraphMode::Links => &self.file_graph.graph,
+                GraphMode::Tags => &self.tag_graph.graph,
+            };
+            if let GraphNode::File(file_path_str) = &graph[node_idx] {
+                let path = Path::new(file_path_str);
+
+                // Simple PDF info display
+                ui.label("PDF Document");
+
+                match std::fs::read(path) {
+                    Ok(data) => {
+                        match pdf::file::FileOptions::cached().load(data.as_slice()) {
+                            Ok(file) => {
+                                let page_count = file.pages().count();
+                                ui.label(format!("Pages: {}", page_count));
+
+                                // Access PDF metadata through the trailer
+                                if let Some(info_dict) = &file.trailer.info_dict {
+                                    if let Some(title) = &info_dict.title {
+                                        ui.label(format!("Title: {}", title.to_string_lossy()));
+                                    }
+                                    if let Some(author) = &info_dict.author {
+                                        ui.label(format!("Author: {}", author.to_string_lossy()));
+                                    }
+                                }
+
+                                // Add a button to open the PDF in external viewer
+                                if ui.button("Open in External Viewer").clicked() {
+                                    self.open_file_externally(path);
+                                }
+                            }
+                            Err(e) => {
+                                ui.label(format!("Failed to parse PDF: {}", e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        ui.label(format!("Failed to read PDF file: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_file_externally(&self, path: &Path) {
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(path)
+                .spawn()
+                .expect("Failed to open file");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(path)
+                .spawn()
+                .expect("Failed to open file");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("start")
+                .arg(path)
+                .spawn()
+                .expect("Failed to open file");
+        }
     }
 
     fn render_code_with_syntax_highlighting(&mut self, ui: &mut egui::Ui, _code_content: &str) {

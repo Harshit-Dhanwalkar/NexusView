@@ -1,5 +1,5 @@
 // src/file_scan.rs
-use crate::utils::is_image_path;
+use crate::utils::{is_image_path, is_pdf_path};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
@@ -110,6 +110,8 @@ impl FileScanner {
                 if is_image_path(path) {
                     self.files.insert(path.to_path_buf(), Vec::new());
                     self.images.push(path.to_path_buf());
+                } else if is_pdf_path(path) {
+                    self.files.insert(path.to_path_buf(), Vec::new());
                 } else if let Ok(content) = fs::read_to_string(path) {
                     let mut links = Vec::new();
                     let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+)\)|\[\[([^\]]+)\]\]").unwrap();

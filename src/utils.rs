@@ -21,6 +21,12 @@ pub fn is_code_path(path: &Path) -> bool {
     })
 }
 
+pub fn is_pdf_path(path: &Path) -> bool {
+    path.extension().map_or(false, |ext| {
+        ext.to_str().unwrap_or("").to_lowercase() == "pdf"
+    })
+}
+
 pub fn rotate_vec2(vec: egui::Vec2, angle_radians: f32) -> egui::Vec2 {
     let cos_a = angle_radians.cos();
     let sin_a = angle_radians.sin();

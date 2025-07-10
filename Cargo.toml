@@ -19,3 +19,4 @@ egui_commonmark = "0.20.0"                         # For Markdown rendering
 syntect = "5.2.0"
 once_cell = "1.21.3"                               # For lazy initialization of syntax sets
 rayon = "1.10.0"                                   # For paraller processing
+pdf = "0.9.0"                                      # For pdf support
