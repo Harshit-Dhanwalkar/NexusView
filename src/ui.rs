@@ -1132,29 +1132,17 @@ impl App for FileGraphApp {
     }
 }
 
-// ... [rest of the implementation remains the same as before]
-
 impl FileGraphApp {
     pub fn new(scan_dir: PathBuf) -> Self {
         let scanner = Arc::new(Mutex::new(FileScanner::new(&scan_dir)));
         let directory_tree = DirectoryNode::build_tree(&scan_dir);
         let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
-        // Initial scan on a separate thread
-        let initial_scanner_clone = scanner.clone();
-        let initial_root_path = scan_dir.clone();
-        let initial_sender_clone = progress_sender.clone();
-
-        std::thread::spawn(move || {
-            let mut locked_scanner = initial_scanner_clone.lock().unwrap();
-            let _ = locked_scanner
-                .scan_directory_with_progress(&initial_root_path, initial_sender_clone);
-        });
 
         let mut app = Self {
             scan_dir: scan_dir.clone(),
             show_directory_panel: true,
             directory_tree,
-            selected_directory: Some(scan_dir.clone()),
+            selected_directory: None,
             current_scan_dir: scan_dir.clone(),
             scanner: scanner.clone(),
             file_graph: FileGraph::new(),
@@ -1205,23 +1193,31 @@ impl FileGraphApp {
     }
 
     fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
+        // Early return checks
         if self.is_scanning {
             eprintln!("Already scanning, ignoring new scan request.");
             return;
         }
 
+        // Validate path
+        if !path_to_scan.is_dir() {
+            self.scan_error = Some("Selected path is not a directory".to_string());
+            return;
+        }
+
+        // Update UI state
         self.is_scanning = true;
         self.scan_progress = 0.0;
         self.scan_status = format!("Scanning: {}", path_to_scan.display());
         self.current_scan_dir = path_to_scan.clone();
         self.scan_error = None;
+        self.current_directory_label = path_to_scan.display().to_string();
 
-        // Clear old physics data
-        self.physics_simulator.node_positions.clear();
-        self.physics_simulator.node_velocities.clear();
-        self.initial_node_layout.clear();
+        // Clear old data
+        self.clear_graph_data();
 
-        let scanner_arc_clone = self.scanner.clone(); // Correct variable name
+        // Prepare for new scan
+        let scanner_arc_clone = self.scanner.clone();
         let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
         self.scan_sender = Some(progress_sender.clone());
         self.scan_progress_receiver = Some(progress_receiver);
@@ -1229,32 +1225,54 @@ impl FileGraphApp {
         let ctx_clone = ctx.clone();
         let show_hidden_clone = self.show_hidden_files;
 
+        // Spawn scanning thread
         thread::spawn(move || {
             let scan_start_time = Instant::now();
-            if let Ok(mut scanner_guard) = scanner_arc_clone.lock() {
-                // Use scanner_arc_clone here
-                scanner_guard.set_show_hidden(show_hidden_clone);
-                let scan_result = scanner_guard
-                    .scan_directory_with_progress(&path_to_scan, progress_sender.clone());
-                drop(scanner_guard);
 
-                match scan_result {
-                    Ok(_) => {
-                        println!("Scan completed in {:?}", scan_start_time.elapsed());
-                        ctx_clone.request_repaint();
-                    }
-                    Err(e) => {
-                        eprintln!("Scan error: {}", e);
-                        let _ = progress_sender.send((1.0, format!("Error: {}", e)));
-                        ctx_clone.request_repaint();
+            match scanner_arc_clone.lock() {
+                Ok(mut scanner_guard) => {
+                    scanner_guard.set_show_hidden(show_hidden_clone);
+
+                    match scanner_guard.scan_directory_with_progress(&path_to_scan, progress_sender)
+                    {
+                        Ok(_) => {
+                            println!("Scan completed in {:?}", scan_start_time.elapsed());
+                        }
+                        Err(e) => {
+                            eprintln!("Scan error: {}", e);
+                        }
                     }
                 }
-            } else {
-                let _ = progress_sender
-                    .send((1.0, "Error: Could not lock scanner for scan.".to_string()));
-                ctx_clone.request_repaint();
+                Err(e) => {
+                    eprintln!("Failed to lock scanner: {}", e);
+                }
             }
+
+            ctx_clone.request_repaint();
         });
+    }
+
+    // Helper function to clear graph data
+    fn clear_graph_data(&mut self) {
+        // Clear physics data
+        self.physics_simulator.node_positions.clear();
+        self.physics_simulator.node_velocities.clear();
+        self.initial_node_layout.clear();
+
+        // Clear graph structures
+        self.file_graph.graph.clear();
+        self.file_graph.node_indices.clear();
+        self.tag_graph.graph.clear();
+        self.tag_graph.file_node_indices.clear();
+        self.tag_graph.tag_node_indices.clear();
+        self.tag_graph.image_node_indices.clear();
+
+        // Clear UI state
+        self.selected_node = None;
+        self.selected_file_content = None;
+        self.selected_image = None;
+        self.search_results.clear();
+        self.current_search_result = 0;
     }
 
     fn build_graphs(&mut self) {
