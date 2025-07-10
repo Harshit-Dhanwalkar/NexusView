@@ -595,6 +595,11 @@ impl App for FileGraphApp {
 
                     if self.dragged_node.is_none() {
                         self.physics_simulator.update(&edges_to_draw);
+                    } else {
+                        let original_time_step = self.physics_simulator.time_step;
+                        self.physics_simulator.time_step = original_time_step * 0.4;
+                        self.physics_simulator.update(&edges_to_draw);
+                        self.physics_simulator.time_step = original_time_step;
                     }
 
                     // Animation effects
