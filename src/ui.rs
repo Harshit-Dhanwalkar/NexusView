@@ -238,6 +238,15 @@ impl App for FileGraphApp {
                 if ui.button("⚙️").clicked() {
                     self.show_physics_menu = !self.show_physics_menu;
                 }
+                // Exit button
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::new("✕ Exit").fill(Color32::from_rgb(200, 80, 80)))
+                        .clicked()
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
             });
 
             // Main controls row
@@ -327,13 +336,6 @@ impl App for FileGraphApp {
 
                 if let Some(ref err) = self.scan_error {
                     ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
-                }
-
-                if ui
-                    .add(egui::Button::new("✕ Exit").fill(Color32::from_rgb(200, 80, 80)))
-                    .clicked()
-                {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
 
