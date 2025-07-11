@@ -60,7 +60,9 @@ NexusView renders PDF content by utilizing the pdfium binaries. To enable PDF pr
 - [ ] "Freeze" Physics (button to pause simulation)
 - [x] Toggle hidden files (`.file` and `.dir`)
 - [ ] Fix toggle hidden files whole `pwd` is being rescanned not `selected directory`
-- [ ] Fix text luminance
+- [ ] Fix text and node luminance
+- [x] Fix when node is being dragged make other nodes slow
+- [ ] Fix when node is being dragged make other nodes dim and change color.
 
 ### Data & Content
 
@@ -69,6 +71,9 @@ NexusView renders PDF content by utilizing the pdfium binaries. To enable PDF pr
 - [ ] Relative Path Links (full support for `../` and `./` links)
 - [ ] URL/External Links (identify and open external URLs)
 - [x] PDF/Document Preview (snippets or basic rendering) : using pdfuim (`https://github.com/bblanchon/pdfium-binaries/releases`)
+- [ ] Add metadata display on top of pdf
+- [ ] Improve PDF rendering
+- [ ] Add PDF scrolling instead of buttons
 
 - [ ] Tag Cloud/List with frequency
 

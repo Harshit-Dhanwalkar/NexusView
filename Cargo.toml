@@ -4,26 +4,26 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-walkdir = "2.5.0"                                  # For directory traversal
-petgraph = "0.8.2"                                 # Graph data structure
-egui = "0.31.1"                                    # GUI framework
-eframe = "0.31.1"                                  # Framework for native apps
-serde = { version = "1.0", features = ["derive"] } # For serialization
-serde_json = "1.0.140"                             # For JSON handling
-regex = "1.11.1"                                   # For parsing file links
-image = "0.25.6"                                   # For image loading and processing
-egui_extras = "0.31.1"                             # For better image display in egui
-rand = "0.9.1"
-egui_commonmark = "0.20.0"                         # For Markdown rendering
-# pulldown-cmark = "0.13.0"                          # For markdown parser
-syntect = "5.2.0"
-once_cell = "1.21.3"                               # For lazy initialization of syntax sets
-rayon = "1.10.0"                                   # For paraller processing
-pdf = "0.9.0"                                      # For pdf support
-pdfium-render = "0.8.34"                           # For pdf rendering
-anyhow = "1.0.98"
-chrono = "0.4.41"
+walkdir = "2.5.0"         # Directory traversal
+petgraph = "0.8.2"        # Graph data structure
+egui = "0.31.1"           # GUI framework
+eframe = "0.31.1"         # Native app framework for egui
+serde = { version = "1.0", features = ["derive"] } # Serialization (e.g., to JSON)
+serde_json = "1.0.140"    # JSON handling
+regex = "1.11.1"          # Regular expressions (for links)
+image = "0.25.6"          # Image loading and processing
+egui_extras = "0.31.1"    # Egui utilities
+rand = "0.9.1"            # Random number generation
+egui_commonmark = "0.20.0" # Markdown rendering in egui
+syntect = "5.2.0"         # Syntax highlighting
+once_cell = "1.21.3"      # Lazy static initialization
+rayon = "1.10.0"          # Parallel processing
+pdf = "0.9.0"             # PDF parsing
+pdfium-render = "0.8.34"  # PDF rendering
+anyhow = "1.0.98"         # Error handling
+chrono = "0.4.41"         # Date and time utilities
+pdf-extract = "0.9.0"     # PDF data extraction
 
 [features]
 default = []
-no_pdf = []
+no_pdf = [] # Feature to disable PDF support

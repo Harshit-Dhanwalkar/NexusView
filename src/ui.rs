@@ -31,7 +31,9 @@ use syntect::util::LinesWithEndings;
 use crate::file_scan::FileScanner;
 use crate::graph::{FileGraph, GraphNode, TagGraph};
 use crate::physics_nodes::PhysicsSimulator;
-use crate::utils::{is_code_path, is_image_path, is_markdown_path, is_pdf_path, rotate_vec2};
+use crate::utils::{
+    is_code_path, is_image_path, is_markdown_path, is_pdf_path, pdf_utils, rotate_vec2,
+};
 
 // Lazy-loaded syntax set and theme
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(|| SyntaxSet::load_defaults_newlines());
@@ -71,6 +73,16 @@ struct PdfViewerState {
     page_render_sender: Option<mpsc::Sender<(PathBuf, usize, egui::TextureHandle, usize)>>,
     loading: bool,
     error: Option<String>,
+    text_content: Option<String>,
+    text_layout: Vec<TextLayout>,
+    selected_text: Option<String>,
+}
+
+#[derive(Clone)]
+struct TextLayout {
+    text: String,
+    rect: egui::Rect,
+    page: usize,
 }
 
 impl DirectoryNode {
@@ -183,6 +195,8 @@ pub struct FileGraphApp<'a> {
     // pdfium_instance: Arc<Pdfium>,
     pdf_viewer_state: PdfViewerState,
     pdf_file_data: HashMap<PathBuf, FileData<'a>>,
+    show_pdf_text: bool,
+    selected_text: Option<String>,
 }
 
 // Structure to hold parsed PDF data
@@ -1264,7 +1278,32 @@ impl<'a> App for FileGraphApp<'a> {
                                         );
                                     }
                                 }
+                                // Add a button to show extracted text
+                                if ui.button("Show Text").clicked() {
+                                    self.show_pdf_text = true;
+                                }
                             });
+
+                            // Render the PDF with selectable text
+                            self.render_pdf_with_text_selection(ui);
+
+                            // Show extracted text in a separate panel if requested
+                            if self.show_pdf_text {
+                                if let Some(text) = &self.pdf_viewer_state.text_content {
+                                    egui::Window::new("Extracted PDF Text")
+                                        .open(&mut self.show_pdf_text)
+                                        .show(ctx, |ui| {
+                                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                                ui.add(
+                                                    egui::TextEdit::multiline(&mut text.clone())
+                                                        .desired_width(f32::INFINITY)
+                                                        .interactive(true)
+                                                        .font(egui::TextStyle::Monospace),
+                                                );
+                                            });
+                                        });
+                                }
+                            }
 
                             // Display the rendered page
                             if let Some(texture) = &self.pdf_viewer_state.rendered_page_texture {
@@ -1384,6 +1423,8 @@ impl<'a> FileGraphApp<'a> {
                 page_render_receiver: Some(page_render_receiver),
                 ..Default::default()
             },
+            show_pdf_text: false,
+            selected_text: None,
         };
 
         if let Some(initial_scan_path) = app.selected_directory.clone() {
@@ -1508,6 +1549,35 @@ impl<'a> FileGraphApp<'a> {
             .unwrap()
             .clone();
 
+        // text extraction
+        match pdf_utils::extract_text_with_layout(&path) {
+            Ok(blocks) => {
+                let mut full_text = String::new();
+                let mut text_layout = Vec::new();
+
+                for block in blocks {
+                    full_text.push_str(&block.text);
+                    full_text.push('\n');
+
+                    text_layout.push(TextLayout {
+                        text: block.text,
+                        rect: egui::Rect::from_min_max(
+                            egui::Pos2::new(block.x, block.y),
+                            egui::Pos2::new(block.x + block.width, block.y + block.height),
+                        ),
+                        page: page_idx,
+                    });
+                }
+
+                self.pdf_viewer_state.text_content = Some(full_text);
+                self.pdf_viewer_state.text_layout = text_layout;
+            }
+            Err(e) => {
+                self.pdf_viewer_state.text_content =
+                    Some(format!("[Could not extract text: {}]", e));
+            }
+        }
+
         thread::spawn(move || {
             // Create a new PDFium instance in the thread
             let pdfium = match Pdfium::bind_to_system_library() {
@@ -1590,6 +1660,44 @@ impl<'a> FileGraphApp<'a> {
             }
             ctx_clone.request_repaint();
         });
+    }
+
+    fn render_pdf_with_text_selection(&mut self, ui: &mut egui::Ui) {
+        if let Some(texture) = &self.pdf_viewer_state.rendered_page_texture {
+            // Get PDF dimensions and calculate scaling
+            let pdf_size = texture.size_vec2();
+            let available_width = ui.available_width();
+            let scale = available_width / pdf_size.x;
+            let scaled_size = pdf_size * scale;
+
+            // Show the PDF image
+            let image_response = ui.add(egui::Image::new(texture).max_size(scaled_size));
+            let image_rect = image_response.rect;
+
+            // Render text overlays
+            if !self.pdf_viewer_state.text_layout.is_empty() {
+                for layout in &self.pdf_viewer_state.text_layout {
+                    if layout.page == self.pdf_viewer_state.current_page_number {
+                        let y_pos = pdf_size.y - layout.rect.max.y; // Flip Y coordinate
+
+                        let text_rect = egui::Rect::from_min_size(
+                            image_rect.min + egui::vec2(layout.rect.min.x * scale, y_pos * scale),
+                            egui::vec2(layout.rect.width() * scale, layout.rect.height() * scale),
+                        );
+
+                        // Make text invisible but interactive
+                        let response = ui.allocate_ui_at_rect(text_rect, |ui| {
+                            ui.label(&layout.text)
+                                .on_hover_cursor(egui::CursorIcon::Text)
+                        });
+
+                        if response.response.clicked() {
+                            self.pdf_viewer_state.selected_text = Some(layout.text.clone());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn display_directory_node(&mut self, ui: &mut egui::Ui, node: &mut DirectoryNode) {
@@ -2127,6 +2235,12 @@ impl<'a> FileGraphApp<'a> {
                 }
             }
         }
+    }
+
+    fn extract_pdf_text(&mut self, path: &Path) -> Result<String, String> {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let text = pdf_extract::extract_text_from_mem(&bytes).map_err(|e| e.to_string())?;
+        Ok(text)
     }
 
     fn open_file_externally(&self, path: &Path) {
