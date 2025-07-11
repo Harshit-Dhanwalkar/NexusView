@@ -64,7 +64,8 @@ cargo run --release -- /path/to/your/directory
 - [x] Markdown Rendering (render Markdown content in preview)
 - [ ] Relative Path Links (full support for `../` and `./` links)
 - [ ] URL/External Links (identify and open external URLs)
-- [ ] PDF/Document Preview (snippets or basic rendering)
+- [x] PDF/Document Preview (snippets or basic rendering) : using pdfuim (`https://github.com/bblanchon/pdfium-binaries/releases`)
+
 - [ ] Tag Cloud/List with frequency
 
 ### Configuration & Persistence

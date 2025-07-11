@@ -9,7 +9,7 @@ use std::sync::mpsc::Sender;
 pub struct FileScanner {
     root_path: PathBuf,
     current_scan_path: PathBuf,
-    show_hidden: bool,
+    pub show_hidden: bool,
     pub files: HashMap<PathBuf, Vec<PathBuf>>,
     pub images: Vec<PathBuf>,
     pub tags: HashMap<PathBuf, Vec<String>>,

@@ -20,3 +20,10 @@ syntect = "5.2.0"
 once_cell = "1.21.3"                               # For lazy initialization of syntax sets
 rayon = "1.10.0"                                   # For paraller processing
 pdf = "0.9.0"                                      # For pdf support
+pdfium-render = "0.8.34"                           # For pdf rendering
+anyhow = "1.0.98"
+chrono = "0.4.41"
+
+[features]
+default = []
+no_pdf = []

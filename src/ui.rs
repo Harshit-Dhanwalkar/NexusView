@@ -1,27 +1,37 @@
 // src/ui.rs
+use chrono::NaiveDateTime;
 use eframe::{App, egui};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Color32, Sense, Stroke, pos2, vec2};
 use egui_commonmark::CommonMarkViewer;
-use petgraph::stable_graph::NodeIndex;
+use image::ImageFormat;
+use once_cell::sync::Lazy;
+use pdf::file::{File, Trailer};
+use pdf::object::*;
+use pdf::primitive::PdfString;
+use pdfium_render::prelude::{
+    PdfBitmap, PdfBitmapFormat, PdfDocument, PdfDocumentMetadataTagType, PdfMetadata, PdfPage,
+    PdfRenderConfig, Pdfium, PdfiumError,
+};
+use petgraph::stable_graph::{NodeIndex, StableGraph};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+use rand::Rng;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme, ThemeSet};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::util::LinesWithEndings;
 
 use crate::file_scan::FileScanner;
 use crate::graph::{FileGraph, GraphNode, TagGraph};
 use crate::physics_nodes::PhysicsSimulator;
 use crate::utils::{is_code_path, is_image_path, is_markdown_path, is_pdf_path, rotate_vec2};
-use egui::{Color32, Sense, Stroke, pos2, vec2};
-use once_cell::sync::Lazy;
-use pdf::file::{File, Trailer};
-use pdf::primitive::PdfString;
-use petgraph::visit::EdgeRef;
-use rand::Rng;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
-use syntect::parsing::{SyntaxReference, SyntaxSet};
-use syntect::util::LinesWithEndings;
 
 // Lazy-loaded syntax set and theme
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(|| SyntaxSet::load_defaults_newlines());
@@ -49,6 +59,18 @@ enum AppState {
     BuildingGraph,
     Ready,
     Error(String),
+}
+
+#[derive(Default)]
+struct PdfViewerState {
+    current_pdf_path: Option<PathBuf>,
+    current_page_number: usize,
+    total_pages: usize,
+    rendered_page_texture: Option<egui::TextureHandle>,
+    page_render_receiver: Option<mpsc::Receiver<(PathBuf, usize, egui::TextureHandle, usize)>>,
+    page_render_sender: Option<mpsc::Sender<(PathBuf, usize, egui::TextureHandle, usize)>>,
+    loading: bool,
+    error: Option<String>,
 }
 
 impl DirectoryNode {
@@ -105,13 +127,19 @@ impl DirectoryNode {
     }
 }
 
-pub struct FileGraphApp {
+pub struct FileGraphApp<'a> {
     scan_dir: PathBuf,
     show_directory_panel: bool,
     directory_tree: DirectoryNode,
     selected_directory: Option<PathBuf>,
     scanner: Arc<Mutex<FileScanner>>,
     file_graph: FileGraph,
+    file_content: Option<String>,
+    image_content: Option<egui::TextureHandle>,
+    node_drag_offset: Option<egui::Vec2>,
+    scroll_to_node: Option<NodeIndex>,
+    search_text: String,
+    filter_tags: String,
     tag_graph: TagGraph,
     current_graph_mode: GraphMode,
     current_scan_dir: PathBuf,
@@ -152,16 +180,24 @@ pub struct FileGraphApp {
     scan_thread_handle: Option<thread::JoinHandle<()>>,
     cancel_sender: Option<std::sync::mpsc::Sender<()>>,
     state: AppState,
+    // pdfium_instance: Arc<Pdfium>,
+    pdf_viewer_state: PdfViewerState,
+    pdf_file_data: HashMap<PathBuf, FileData<'a>>,
 }
 
-impl App for FileGraphApp {
+// Structure to hold parsed PDF data
+pub struct FileData<'a> {
+    pub metadata: Option<PdfMetadata<'a>>,
+    pub pages: Vec<PdfPage<'a>>,
+}
+
+impl<'a> App for FileGraphApp<'a> {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.update_ui_state(ctx);
         match self.state {
             AppState::Ready => {
                 // Normal UI rendering
             }
-
             AppState::Error(ref err) => {
                 let error_message = err.clone();
                 egui::Window::new("Error")
@@ -1117,7 +1153,7 @@ impl App for FileGraphApp {
                     }
                 });
 
-        // In the right panel section of the update method:
+        // Right panel section
         egui::SidePanel::right("file_content_panel")
             .min_width(200.0)
             .show_animated(ctx, self.show_content_panel, |ui| {
@@ -1150,31 +1186,122 @@ impl App for FileGraphApp {
 
                     ui.label(egui::RichText::new(file_name).strong());
                     ui.separator();
-                }
 
-                if let Some(content) = &self.selected_file_content {
-                    if self.is_markdown_file() {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            CommonMarkViewer::new().show(ui, &mut self.markdown_cache, content);
-                        });
-                    } else if self.is_code_file() {
-                        let content_clone = content.clone();
-                        self.render_code_with_syntax_highlighting(ui, &content_clone);
-                    } else if self.is_pdf_file() {
-                        self.render_pdf_preview(ui);
-                    } else {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            ui.label(content);
-                        });
+                    let path = match self.current_graph_mode {
+                        GraphMode::Links => match &self.file_graph.graph[node_idx] {
+                            GraphNode::File(s) => PathBuf::from(s),
+                            GraphNode::Tag(_) => {
+                                ui.label("Tag node selected");
+                                return;
+                            }
+                        },
+                        GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
+                            GraphNode::File(s) => PathBuf::from(s),
+                            GraphNode::Tag(_) => {
+                                ui.label("Tag node selected");
+                                return;
+                            }
+                        },
+                    };
+
+                    if is_pdf_path(&path) {
+                        // Check for rendered page updates
+                        if let Some(receiver) = &mut self.pdf_viewer_state.page_render_receiver {
+                            while let Ok((path, page_idx, texture, total_pages)) =
+                                receiver.try_recv()
+                            {
+                                if Some(&path) == self.pdf_viewer_state.current_pdf_path.as_ref() {
+                                    self.pdf_viewer_state.rendered_page_texture = Some(texture);
+                                    self.pdf_viewer_state.total_pages = total_pages;
+                                    self.pdf_viewer_state.loading = false;
+                                    self.pdf_viewer_state.current_page_number = page_idx;
+                                }
+                            }
+                        }
+
+                        if self.pdf_viewer_state.loading {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Loading PDF page...");
+                            });
+                        } else if let Some(error) = &self.pdf_viewer_state.error {
+                            ui.colored_label(Color32::RED, error);
+                        } else {
+                            // PDF controls
+                            ui.horizontal(|ui| {
+                                if ui.button("◀").clicked() {
+                                    if self.pdf_viewer_state.current_page_number > 0 {
+                                        self.load_and_render_pdf_page(
+                                            ctx,
+                                            self.pdf_viewer_state
+                                                .current_pdf_path
+                                                .as_ref()
+                                                .unwrap()
+                                                .clone(),
+                                            self.pdf_viewer_state.current_page_number - 1,
+                                        );
+                                    }
+                                }
+
+                                ui.label(format!(
+                                    "Page {} of {}",
+                                    self.pdf_viewer_state.current_page_number + 1,
+                                    self.pdf_viewer_state.total_pages
+                                ));
+
+                                if ui.button("▶").clicked() {
+                                    if self.pdf_viewer_state.current_page_number + 1
+                                        < self.pdf_viewer_state.total_pages
+                                    {
+                                        self.load_and_render_pdf_page(
+                                            ctx,
+                                            self.pdf_viewer_state
+                                                .current_pdf_path
+                                                .as_ref()
+                                                .unwrap()
+                                                .clone(),
+                                            self.pdf_viewer_state.current_page_number + 1,
+                                        );
+                                    }
+                                }
+                            });
+
+                            // Display the rendered page
+                            if let Some(texture) = &self.pdf_viewer_state.rendered_page_texture {
+                                egui::ScrollArea::both().show(ui, |ui| {
+                                    let size = texture.size_vec2();
+                                    let available_width = ui.available_width();
+                                    let scale = available_width / size.x;
+                                    let scaled_size = size * scale;
+
+                                    ui.add(egui::Image::new(texture).max_size(scaled_size));
+                                });
+                            }
+                        }
+                    } else if is_image_path(&path) {
+                        if let Some(image) = &self.selected_image {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                // Show image dimensions
+                                let size = image.size_vec2();
+                                ui.label(format!("Dimensions: {} × {} px", size.x, size.y));
+                                ui.add_space(10.0);
+                                ui.add(egui::Image::new(image).max_size(size));
+                            });
+                        }
+                    } else if let Some(content) = &self.selected_file_content {
+                        if self.is_markdown_file() {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                CommonMarkViewer::new().show(ui, &mut self.markdown_cache, content);
+                            });
+                        } else if self.is_code_file() {
+                            let content_clone = content.clone();
+                            self.render_code_with_syntax_highlighting(ui, &content_clone);
+                        } else {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                ui.label(content);
+                            });
+                        }
                     }
-                } else if let Some(image) = &self.selected_image {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        // Show image dimensions
-                        let size = image.size_vec2();
-                        ui.label(format!("Dimensions: {} × {} px", size.x, size.y));
-                        ui.add_space(10.0);
-                        ui.image(image);
-                    });
                 } else {
                     ui.label("Select a file node to view its content.");
                 }
@@ -1182,11 +1309,19 @@ impl App for FileGraphApp {
     }
 }
 
-impl FileGraphApp {
+impl<'a> FileGraphApp<'a> {
     pub fn new(scan_dir: PathBuf) -> Self {
         let scanner = Arc::new(Mutex::new(FileScanner::new(&scan_dir)));
         let directory_tree = DirectoryNode::build_tree(&scan_dir);
         let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
+
+        let (page_render_sender, page_render_receiver) =
+            mpsc::channel::<(PathBuf, usize, egui::TextureHandle, usize)>();
+
+        // Initialize PDFium once when the app starts
+        let pdfium = Arc::new(Pdfium::new(
+            Pdfium::bind_to_system_library().expect("Failed to bind to system PDFium"),
+        ));
 
         let mut app = Self {
             scan_dir: scan_dir.clone(),
@@ -1196,6 +1331,12 @@ impl FileGraphApp {
             current_scan_dir: scan_dir.clone(),
             scanner: scanner.clone(),
             file_graph: FileGraph::new(),
+            file_content: None,
+            image_content: None,
+            node_drag_offset: None,
+            scroll_to_node: None,
+            search_text: String::new(),
+            filter_tags: String::new(),
             tag_graph: TagGraph::new(),
             current_graph_mode: GraphMode::Links,
             show_full_paths: false,
@@ -1236,6 +1377,13 @@ impl FileGraphApp {
             cancel_sender: None,
             scan_thread_handle: None,
             state: AppState::Idle,
+            pdf_file_data: HashMap::new(),
+            // pdfium_instance: pdfium,
+            pdf_viewer_state: PdfViewerState {
+                page_render_sender: Some(page_render_sender),
+                page_render_receiver: Some(page_render_receiver),
+                ..Default::default()
+            },
         };
 
         if let Some(initial_scan_path) = app.selected_directory.clone() {
@@ -1245,80 +1393,6 @@ impl FileGraphApp {
         app
     }
 
-    // fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
-    //     // Clean up any previous scan
-    //     self.cancel_scan();
-    //
-    //     // Early return checks
-    //     if self.is_scanning {
-    //         eprintln!("Already scanning, ignoring new scan request.");
-    //         return;
-    //     }
-    //
-    //     // Validate path
-    //     if !path_to_scan.is_dir() {
-    //         self.scan_error = Some("Selected path is not a directory".to_string());
-    //         return;
-    //     }
-    //
-    //     // Update UI state
-    //     self.is_scanning = true;
-    //     self.scan_progress = 0.0;
-    //     self.scan_status = format!("Scanning: {}", path_to_scan.display());
-    //     self.current_scan_dir = path_to_scan.clone();
-    //     self.scan_error = None;
-    //     self.current_directory_label = path_to_scan.display().to_string();
-    //
-    //     // Clear old data
-    //     self.clear_graph_data();
-    //
-    //     // Create communication channels
-    //     let (cancel_sender, cancel_receiver) = std::sync::mpsc::channel();
-    //     let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
-    //
-    //     // Store the sender for potential cancellation
-    //     self.cancel_sender = Some(cancel_sender);
-    //     self.scan_sender = Some(progress_sender.clone());
-    //     self.scan_progress_receiver = Some(progress_receiver);
-    //
-    //     // Clone necessary values for the thread
-    //     let scanner_arc_clone = self.scanner.clone();
-    //     let ctx_clone = ctx.clone();
-    //     let show_hidden_clone = self.show_hidden_files;
-    //
-    //     // Spawn scanning thread
-    //     self.scan_thread_handle = Some(thread::spawn(move || {
-    //         let scan_start_time = Instant::now();
-    //         let mut last_progress_update = Instant::now();
-    //
-    //         // Check for cancellation before starting
-    //         if cancel_receiver.try_recv().is_ok() {
-    //             return;
-    //         }
-    //
-    //         match scanner_arc_clone.lock() {
-    //             Ok(mut scanner_guard) => {
-    //                 scanner_guard.set_show_hidden(show_hidden_clone);
-    //
-    //                 // Main scanning loop with periodic cancellation checks
-    //                 match scanner_guard.scan_directory_with_progress(&path_to_scan, progress_sender)
-    //                 {
-    //                     Ok(_) => {
-    //                         println!("Scan completed in {:?}", scan_start_time.elapsed());
-    //                     }
-    //                     Err(e) => {
-    //                         eprintln!("Scan error: {}", e);
-    //                     }
-    //                 }
-    //             }
-    //             Err(e) => {
-    //                 eprintln!("Failed to lock scanner: {}", e);
-    //             }
-    //         }
-    //
-    //         ctx_clone.request_repaint();
-    //     }));
-    // }
     fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
         self.cancel_scan();
 
@@ -1372,26 +1446,6 @@ impl FileGraphApp {
         }));
     }
 
-    // fn cancel_scan(&mut self) {
-    //     // Send cancellation signal
-    //     if let Some(sender) = self.cancel_sender.take() {
-    //         let _ = sender.send(());
-    //     }
-    //
-    //     // Wait for thread to finish
-    //     if let Some(handle) = self.scan_thread_handle.take() {
-    //         match handle.join() {
-    //             Ok(_) => {
-    //                 self.is_scanning = false;
-    //                 self.scan_status = "Scan cancelled".to_string();
-    //             }
-    //             Err(e) => {
-    //                 eprintln!("Error joining scan thread: {:?}", e);
-    //                 self.scan_error = Some("Failed to properly cancel scan".to_string());
-    //             }
-    //         }
-    //     }
-    // }
     fn cancel_scan(&mut self) {
         if let Some(sender) = self.cancel_sender.take() {
             let _ = sender.send(());
@@ -1410,6 +1464,250 @@ impl FileGraphApp {
         }
     }
 
+    // Helper to build the directory tree
+    fn build_directory_tree(path: &Path) -> Option<DirectoryNode> {
+        if !path.is_dir() {
+            return None;
+        }
+
+        let mut node = DirectoryNode {
+            path: path.to_path_buf(),
+            children: Vec::new(),
+            expanded: false,
+            selected: false,
+        };
+
+        if let Ok(entries) = fs::read_dir(path) {
+            let mut sorted_entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            sorted_entries.sort_by_key(|e| e.path()); // Sort entries for consistent order
+
+            for entry in sorted_entries {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    if let Some(child_node) = Self::build_directory_tree(&entry_path) {
+                        node.children.push(child_node);
+                    }
+                }
+            }
+        }
+        Some(node)
+    }
+
+    fn load_and_render_pdf_page(&mut self, ctx: &egui::Context, path: PathBuf, page_idx: usize) {
+        self.pdf_viewer_state.rendered_page_texture = None;
+        self.pdf_viewer_state.current_pdf_path = Some(path.clone());
+        self.pdf_viewer_state.current_page_number = page_idx;
+        self.pdf_viewer_state.loading = true;
+        self.pdf_viewer_state.error = None;
+
+        let ctx_clone = ctx.clone();
+        let render_sender = self
+            .pdf_viewer_state
+            .page_render_sender
+            .as_ref()
+            .unwrap()
+            .clone();
+
+        thread::spawn(move || {
+            // Create a new PDFium instance in the thread
+            let pdfium = match Pdfium::bind_to_system_library() {
+                Ok(bindings) => Pdfium::new(bindings),
+                Err(e) => {
+                    eprintln!("Failed to bind to PDFium: {:?}", e);
+                    ctx_clone.request_repaint();
+                    return;
+                }
+            };
+
+            let document = match pdfium.load_pdf_from_file(&path, None) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    eprintln!("Failed to load PDF: {:?}", e);
+                    ctx_clone.request_repaint();
+                    return;
+                }
+            };
+
+            let total_pages = document.pages().len();
+            let actual_page_idx = page_idx.min(total_pages.saturating_sub(1).into());
+
+            let page = match document.pages().get(actual_page_idx as u16) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to get page: {:?}", e);
+                    ctx_clone.request_repaint();
+                    return;
+                }
+            };
+
+            let render_config = PdfRenderConfig::new()
+                .set_target_width((page.width().value * 2.0) as i32)
+                .set_target_height((page.height().value * 2.0) as i32);
+
+            let mut bitmap = match PdfBitmap::empty(
+                (page.width().value * 2.0) as i32,
+                (page.height().value * 2.0) as i32,
+                PdfBitmapFormat::BGRA,
+                pdfium.bindings(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Failed to create bitmap: {:?}", e);
+                    ctx_clone.request_repaint();
+                    return;
+                }
+            };
+
+            if let Err(e) = page.render_into_bitmap_with_config(&mut bitmap, &render_config) {
+                eprintln!("Failed to render page: {:?}", e);
+                ctx_clone.request_repaint();
+                return;
+            }
+
+            let width = bitmap.width() as usize;
+            let height = bitmap.height() as usize;
+
+            // Convert BGRA to RGBA
+            let mut pixels_rgba = Vec::with_capacity(width * height * 4);
+            let raw_bytes = bitmap.as_raw_bytes();
+
+            for chunk in raw_bytes.chunks_exact(4) {
+                pixels_rgba.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+            }
+
+            let color_image =
+                egui::ColorImage::from_rgba_unmultiplied([width, height], &pixels_rgba);
+            let texture = ctx_clone.load_texture(
+                format!("pdf_page_{}_{}", path.display(), actual_page_idx),
+                color_image,
+                egui::TextureOptions::default(),
+            );
+
+            if let Err(e) =
+                render_sender.send((path, actual_page_idx, texture, total_pages as usize))
+            {
+                eprintln!("Failed to send rendered page: {:?}", e);
+            }
+            ctx_clone.request_repaint();
+        });
+    }
+
+    fn display_directory_node(&mut self, ui: &mut egui::Ui, node: &mut DirectoryNode) {
+        ui.indent("dir_indent", |ui| {
+            ui.horizontal(|ui| {
+                let dir_name = node
+                    .path
+                    .file_name()
+                    .map_or(".".into(), |n| n.to_string_lossy().into_owned());
+                let expanded = node.expanded;
+                let response =
+                    ui.toggle_value(&mut node.expanded, if expanded { "📂" } else { "📁" });
+                if response.clicked() {
+                    // If directory is expanded/collapsed, no need to select it
+                }
+
+                let label_response = ui.label(dir_name).interact(Sense::click());
+                if label_response.clicked() {
+                    // Clicking the label should also toggle expansion
+                    node.expanded = !node.expanded;
+                }
+            });
+
+            if node.expanded {
+                let mut files_and_subdirs: Vec<PathBuf> = Vec::new();
+                if let Ok(entries) = fs::read_dir(&node.path) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let path = entry.path();
+                        if !self.scanner.lock().unwrap().show_hidden
+                            && path
+                                .file_name()
+                                .map_or(false, |name| name.to_string_lossy().starts_with("."))
+                        {
+                            continue;
+                        }
+                        files_and_subdirs.push(path);
+                    }
+                }
+                files_and_subdirs.sort_by_key(|p| (p.is_file(), p.clone())); // Sort: directories first, then files, then alphabetically
+
+                for entry_path in files_and_subdirs {
+                    if entry_path.is_dir() {
+                        if let Some(child_node) =
+                            node.children.iter_mut().find(|n| n.path == entry_path)
+                        {
+                            self.display_directory_node(ui, child_node);
+                        }
+                    } else if entry_path.is_file() {
+                        let file_name = entry_path
+                            .file_name()
+                            .map_or("".into(), |n| n.to_string_lossy().into_owned());
+                        ui.horizontal(|ui| {
+                            let is_selected = self
+                                .selected_file_content
+                                .as_ref()
+                                .map(|s| PathBuf::from(s))
+                                == Some(entry_path.clone());
+                            let label_text = if is_selected {
+                                egui::RichText::new(file_name)
+                                    .strong()
+                                    .color(ui.visuals().selection.stroke.color)
+                            } else {
+                                egui::RichText::new(file_name)
+                            };
+
+                            if ui.selectable_label(is_selected, label_text).clicked() {
+                                self.selected_file_content = Some(entry_path.display().to_string());
+                                self.file_content = None; // Clear previous content
+                                self.image_content = None; // Clear previous image
+                                // Clear PDF state if new file is not PDF or is a different PDF
+                                if !is_pdf_path(&entry_path)
+                                    || self.pdf_viewer_state.current_pdf_path.as_ref()
+                                        != Some(&entry_path)
+                                {
+                                    self.pdf_viewer_state = Default::default();
+                                    // Re-establish channels as they are None after Default::default()
+                                    let (sender, receiver) = mpsc::channel();
+                                    self.pdf_viewer_state.page_render_sender = Some(sender);
+                                    self.pdf_viewer_state.page_render_receiver = Some(receiver);
+                                }
+
+                                // Load PDF metadata if it's a PDF
+                                if is_pdf_path(&entry_path)
+                                    && !self.pdf_file_data.contains_key(&entry_path)
+                                {
+                                    let path_clone = entry_path.clone();
+                                    let ctx_clone = ui.ctx().clone();
+                                    thread::spawn(move || {
+                                        // Create new PDFium instance in the thread
+                                        let pdfium = match Pdfium::bind_to_system_library() {
+                                            Ok(bindings) => Pdfium::new(bindings),
+                                            Err(e) => {
+                                                eprintln!("Failed to bind to PDFium: {:?}", e);
+                                                return;
+                                            }
+                                        };
+
+                                        match pdfium.load_pdf_from_file(&path_clone, None) {
+                                            Ok(document) => {
+                                                let metadata = document.metadata();
+                                                let pages: Vec<PdfPage> =
+                                                    document.pages().iter().collect();
+                                                // Store or process the metadata as needed
+                                                ctx_clone.request_repaint();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Failed to load PDF: {:?}", e);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    }
     // Helper function to clear graph data
     fn clear_graph_data(&mut self) {
         // Clear physics data
@@ -1456,9 +1754,7 @@ impl FileGraphApp {
                     ctx.request_repaint();
                 }
             }
-            AppState::Ready | AppState::Idle | AppState::Error(_) => {
-                // No special handling needed for these states in this method
-            }
+            AppState::Ready | AppState::Idle | AppState::Error(_) => {}
         }
     }
 
@@ -1606,8 +1902,14 @@ impl FileGraphApp {
 
     fn try_load_file_content(&mut self, path: PathBuf, ctx: &egui::Context) {
         if is_pdf_path(&path) {
-            self.selected_file_content = Some(path.display().to_string());
+            self.selected_file_content = Some("PDF Document".to_string());
             self.selected_image = None;
+            self.pdf_viewer_state = PdfViewerState {
+                page_render_sender: self.pdf_viewer_state.page_render_sender.take(),
+                page_render_receiver: self.pdf_viewer_state.page_render_receiver.take(),
+                ..Default::default()
+            };
+            self.load_and_render_pdf_page(ctx, path, 0);
         } else if is_image_path(&path) {
             match image::open(&path) {
                 Ok(img) => {
@@ -1983,6 +2285,265 @@ impl FileGraphApp {
             _ => SYNTAX_SET
                 .find_syntax_by_extension(lang)
                 .or_else(|| Some(SYNTAX_SET.find_syntax_plain_text())),
+        }
+    }
+
+    fn draw_graph_and_handle_interactions(&mut self, ui: &mut egui::Ui) {
+        let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::drag());
+
+        let graph = if self.current_graph_mode == GraphMode::Links {
+            &mut self.file_graph.graph
+        } else {
+            &mut self.tag_graph.graph
+        };
+
+        let nodes_to_draw: Vec<NodeIndex> = if self.search_text.is_empty()
+            && self.filter_tags.is_empty()
+        {
+            graph.node_indices().collect()
+        } else {
+            let search_lower = self.search_text.to_lowercase();
+            let filter_tags_lower: Vec<String> = self
+                .filter_tags
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            graph
+                .node_indices()
+                .filter(|&idx| {
+                    if let Some(node_data) = graph.node_weight(idx) {
+                        match node_data {
+                            GraphNode::File(name) => {
+                                let name_lower = name.to_lowercase();
+                                let matches_search =
+                                    search_lower.is_empty() || name_lower.contains(&search_lower);
+                                let matches_tags = if filter_tags_lower.is_empty() {
+                                    true
+                                } else {
+                                    if let Some(path) = PathBuf::from(name).canonicalize().ok() {
+                                        self.scanner.lock().unwrap().tags.get(&path).map_or(
+                                            false,
+                                            |file_tags| {
+                                                file_tags.iter().any(|tag| {
+                                                    filter_tags_lower.contains(&tag.to_lowercase())
+                                                })
+                                            },
+                                        )
+                                    } else {
+                                        false
+                                    }
+                                };
+                                matches_search && matches_tags
+                            }
+                            GraphNode::Tag(tag) => {
+                                let tag_lower = tag.to_lowercase();
+                                let matches_search =
+                                    search_lower.is_empty() || tag_lower.contains(&search_lower);
+                                let matches_filter = filter_tags_lower.is_empty()
+                                    || filter_tags_lower.contains(&tag_lower);
+                                matches_search && matches_filter
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .collect()
+        };
+
+        // Physics simulation step
+        if !self.physics_simulator.frozen {
+            self.physics_simulator.apply_forces(&nodes_to_draw, graph);
+            self.physics_simulator.update_positions();
+        }
+
+        let rect = response.rect;
+        let center = rect.center();
+
+        // Handle dragging
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(dragged_idx) = self.dragged_node {
+                if let Some(start_pos) = self
+                    .physics_simulator
+                    .get_node_position(dragged_idx)
+                    .copied()
+                {
+                    if self.node_drag_offset.is_none() {
+                        // Calculate initial offset only once at the start of the drag
+                        self.node_drag_offset =
+                            Some((response.interact_pointer_pos().unwrap() - start_pos).to_vec2())
+                    }
+                    let new_pos =
+                        response.interact_pointer_pos().unwrap() - self.node_drag_offset.unwrap();
+                    self.physics_simulator
+                        .set_node_position(dragged_idx, new_pos.to_vec2());
+                    self.physics_simulator
+                        .set_node_velocity(dragged_idx, egui::Vec2::ZERO);
+                    self.physics_simulator.frozen = true;
+                }
+            } else {
+                for (_, pos) in self.physics_simulator.node_positions.iter_mut() {
+                    *pos += response.drag_delta();
+                }
+            }
+        } else if response.drag_stopped_by(egui::PointerButton::Primary) {
+            self.dragged_node = None;
+            self.node_drag_offset = None;
+            self.physics_simulator.frozen = false; // Unfreeze physics after dragging
+        }
+
+        // Handle clicks for node selection
+        if response.clicked_by(egui::PointerButton::Primary) {
+            let pointer_pos = response.interact_pointer_pos().unwrap_or(egui::Pos2::ZERO);
+            self.selected_file_content = None; // Deselect file if clicked empty space
+            self.file_content = None;
+            self.image_content = None;
+            self.pdf_viewer_state = Default::default(); // Reset PDF viewer state
+
+            let (page_render_sender, page_render_receiver) = mpsc::channel();
+            self.pdf_viewer_state.page_render_sender = Some(page_render_sender);
+            self.pdf_viewer_state.page_render_receiver = Some(page_render_receiver);
+
+            // Check if any node was clicked
+            for &node_idx in &nodes_to_draw {
+                if let Some(&node_pos) = self.physics_simulator.get_node_position(node_idx) {
+                    let screen_pos = pos2(node_pos.x + center.x, node_pos.y + center.y);
+                    let distance = pointer_pos.distance(screen_pos);
+                    let node_radius = 15.0;
+
+                    if distance <= node_radius {
+                        if let Some(GraphNode::File(file_name)) = graph.node_weight(node_idx) {
+                            let file_path = PathBuf::from(file_name);
+                            self.selected_file_content = Some(file_path.display().to_string());
+
+                            // Load PDF metadata if it's a PDF and not already loaded
+                            if is_pdf_path(&file_path)
+                                && !self.pdf_file_data.contains_key(&file_path)
+                            {
+                                let path_clone = file_path.clone();
+                                let ctx_clone = ui.ctx().clone();
+                                thread::spawn(move || {
+                                    // Create new PDFium instance in the thread
+                                    let pdfium = match Pdfium::bind_to_system_library() {
+                                        Ok(bindings) => Pdfium::new(bindings),
+                                        Err(e) => {
+                                            eprintln!("Failed to bind to PDFium: {:?}", e);
+                                            return;
+                                        }
+                                    };
+
+                                    let metadata_result = pdfium
+                                        .load_pdf_from_file(&path_clone, None)
+                                        .map_err(|e| e.to_string());
+
+                                    if let Ok(file) = metadata_result {
+                                        let metadata = file.metadata();
+                                        let pages: Vec<PdfPage> = file.pages().iter().collect();
+                                        ctx_clone.request_repaint();
+                                    } else {
+                                        eprintln!(
+                                            "Failed to load PDF metadata: {:?}",
+                                            metadata_result.unwrap_err()
+                                        );
+                                    }
+                                    ctx_clone.request_repaint();
+                                });
+                            }
+                        }
+                        self.dragged_node = Some(node_idx);
+                        break; // Only select and drag one node
+                    }
+                }
+            }
+        }
+
+        // Draw edges
+        for edge_ref in graph.edge_references() {
+            let source_idx = edge_ref.source();
+            let target_idx = edge_ref.target();
+
+            // Only draw edges between visible nodes
+            if nodes_to_draw.contains(&source_idx) && nodes_to_draw.contains(&target_idx) {
+                if let (Some(&source_pos), Some(&target_pos)) = (
+                    self.physics_simulator.get_node_position(source_idx),
+                    self.physics_simulator.get_node_position(target_idx),
+                ) {
+                    painter.line_segment(
+                        [
+                            pos2(source_pos.x + center.x, source_pos.y + center.y),
+                            pos2(target_pos.x + center.x, target_pos.y + center.y),
+                        ],
+                        Stroke::new(1.0, Color32::GRAY),
+                    );
+                }
+            }
+        }
+
+        // Draw nodes
+        for &node_idx in &nodes_to_draw {
+            if let Some(node_pos) = self.physics_simulator.get_node_position(node_idx) {
+                let screen_pos = pos2(node_pos.x + center.x, node_pos.y + center.y);
+                let node_data = graph.node_weight(node_idx);
+
+                let (text, fill_color, stroke_color) = match node_data {
+                    Some(GraphNode::File(name)) => {
+                        let path = PathBuf::from(name);
+                        let is_selected = self
+                            .selected_file_content
+                            .as_ref()
+                            .map(|s| PathBuf::from(s))
+                            == Some(path);
+                        let fill = if is_selected {
+                            Color32::LIGHT_BLUE
+                        } else {
+                            Color32::BLUE
+                        };
+                        let stroke = if is_selected {
+                            Color32::WHITE
+                        } else {
+                            Color32::DARK_BLUE
+                        };
+                        (name.clone(), fill, stroke)
+                    }
+                    Some(GraphNode::Tag(tag)) => {
+                        let is_filtered = self
+                            .filter_tags
+                            .split(',')
+                            .any(|s| s.trim().to_lowercase() == tag.to_lowercase());
+                        let fill = if is_filtered {
+                            Color32::LIGHT_GREEN
+                        } else {
+                            Color32::DARK_GREEN
+                        };
+                        let stroke = if is_filtered {
+                            Color32::WHITE
+                        } else {
+                            Color32::DARK_GRAY
+                        };
+                        (format!("#{}", tag), fill, stroke)
+                    }
+                    None => ("Unknown".to_string(), Color32::RED, Color32::BLACK),
+                };
+
+                let text_color = Color32::WHITE;
+                let node_radius = 15.0;
+
+                painter.circle_filled(screen_pos, node_radius, fill_color);
+                painter.circle_stroke(screen_pos, node_radius, Stroke::new(1.0, stroke_color));
+
+                // Draw text label centered on the node
+                let font_id = egui::FontId::new(14.0, egui::FontFamily::Proportional);
+                let galley = ui.fonts(|f| f.layout_no_wrap(text, font_id, text_color));
+                let text_pos = screen_pos - galley.size() / 2.0;
+                painter.galley(text_pos, galley, egui::Color32::WHITE);
+            }
+        }
+
+        // Scroll to newly selected node if any
+        if let Some(idx) = self.scroll_to_node.take() {
+            if let Some(pos) = self.physics_simulator.get_node_position(idx) {}
         }
     }
 }

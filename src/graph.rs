@@ -1,5 +1,6 @@
 // src/graph.rs
 use crate::file_scan;
+use petgraph::stable_graph::StableGraph;
 use petgraph::{Graph, graph::NodeIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,12 +12,12 @@ pub enum GraphNode {
 }
 
 pub struct FileGraph {
-    pub graph: Graph<GraphNode, ()>,
+    pub graph: StableGraph<GraphNode, ()>,
     pub node_indices: HashMap<PathBuf, NodeIndex>,
 }
 
 pub struct TagGraph {
-    pub graph: Graph<GraphNode, ()>,
+    pub graph: StableGraph<GraphNode, ()>,
     pub file_node_indices: HashMap<PathBuf, NodeIndex>,
     pub image_node_indices: HashMap<PathBuf, NodeIndex>,
     pub tag_node_indices: HashMap<String, NodeIndex>,
@@ -25,7 +26,7 @@ pub struct TagGraph {
 impl FileGraph {
     pub fn new() -> Self {
         Self {
-            graph: Graph::new(),
+            graph: StableGraph::new(),
             node_indices: HashMap::new(),
         }
     }
@@ -70,7 +71,7 @@ impl FileGraph {
 impl TagGraph {
     pub fn new() -> Self {
         Self {
-            graph: Graph::new(),
+            graph: StableGraph::new(),
             file_node_indices: HashMap::new(),
             tag_node_indices: HashMap::new(),
             image_node_indices: HashMap::new(),

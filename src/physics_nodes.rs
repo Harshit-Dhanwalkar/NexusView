@@ -1,8 +1,11 @@
 // src/physics_nodes.rs
 use egui::Vec2;
 use petgraph::graph::NodeIndex;
+use petgraph::stable_graph::StableGraph;
 use rayon::prelude::*;
 use std::collections::HashMap;
+
+use crate::graph::GraphNode;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhysicsNode {
@@ -174,5 +177,16 @@ impl PhysicsSimulator {
 
     pub fn set_time_step(&mut self, time_step: f32) {
         self.time_step = time_step.max(0.0);
+    }
+
+    pub fn update_positions(&mut self) {}
+
+    pub fn apply_forces(&mut self, nodes: &[NodeIndex], graph: &StableGraph<GraphNode, ()>) {}
+
+    pub fn initialize_positions_from_graph(
+        &mut self,
+        graph: &StableGraph<GraphNode, ()>,
+        center: egui::Vec2,
+    ) {
     }
 }
