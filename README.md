@@ -29,6 +29,10 @@ cd NexusView
 cargo run --release -- /path/to/your/directory
 ```
 
+## PDF Rendering
+
+NexusView renders PDF content by utilizing the pdfium binaries. To enable PDF preview, you need to download the pdfium-binaries from `https://github.com/bblanchon/pdfium-binaries/releases` and grab appropriate binary for your system (for linux I have used `pdfium-v8-linux-x64.tgz`) and then copy the extracted binaries into from `pdfium/lib/libpdfium.so` to `/target/debug/` or for system-wide `/usr/lib/` directory.
+
 ---
 
 ## TODO
