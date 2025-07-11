@@ -40,8 +40,8 @@ NexusView renders PDF content by utilizing the pdfium binaries. To enable PDF pr
 ### Core Graph Functionality
 
 - [x] Directed Edges (Arrows)
-- [ ] Fix graph zooming
-- [ ] Fix graph panning
+- [x] Fix graph zooming (But only with buttons, no mouse wheel)
+- [x] Fix graph panning (use middle mouse button)
 - [ ] Fix Focus on Node (re-center and zoom on selected node)
 - [ ] Graph mode link and tag in one with toggle
 - [ ] "Show Orphans" unexpected behavior
@@ -73,8 +73,7 @@ NexusView renders PDF content by utilizing the pdfium binaries. To enable PDF pr
 - [x] PDF/Document Preview (snippets or basic rendering) : using pdfuim (`https://github.com/bblanchon/pdfium-binaries/releases`)
 - [ ] Add metadata display on top of pdf
 - [ ] Improve PDF rendering
-- [ ] Add PDF scrolling instead of buttons
-
+- [x] Add PDF scrolling instead of buttons
 - [ ] Tag Cloud/List with frequency
 
 ### Configuration & Persistence

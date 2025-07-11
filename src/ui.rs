@@ -1222,14 +1222,28 @@ impl<'a> App for FileGraphApp<'a> {
 
                     ui.separator();
 
-                    if ui.button("Reset Node Positions").clicked() {
-                        self.physics_simulator
-                            .reset_positions(&self.initial_node_layout);
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset Node Positions").clicked() {
+                            self.physics_simulator
+                                .reset_positions(&self.initial_node_layout);
+                        }
 
-                    if ui.button("Center Graph").clicked() {
-                        should_center_graph = true;
-                    }
+                        if ui.button("Center Graph").clicked() {
+                            should_center_graph = true;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Zoom: {:.1}x", self.graph_zoom_factor));
+                        if ui.button("Zoom In (+)").clicked() {
+                            self.graph_zoom_factor *= 1.1;
+                            self.graph_zoom_factor = self.graph_zoom_factor.clamp(0.1, 10.0);
+                        }
+                        if ui.button("Zoom Out (-)").clicked() {
+                            self.graph_zoom_factor /= 1.1;
+                            self.graph_zoom_factor = self.graph_zoom_factor.clamp(0.1, 10.0);
+                        }
+                    });
                 });
             if should_center_graph {
                 self.center_graph();
