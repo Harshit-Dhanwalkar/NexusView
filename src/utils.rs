@@ -34,9 +34,13 @@ pub fn rotate_vec2(vec: egui::Vec2, angle_radians: f32) -> egui::Vec2 {
 }
 
 pub mod pdf_utils {
+    use pdf::error::PdfError;
+    use pdf::file::FileOptions;
+    use pdf::object::*;
     use pdf::object::*;
     use pdf::primitive::PdfString;
     use pdf_extract::OutputError;
+    use pdf_extract::content::Operation;
     use std::fmt;
     use std::path::Path;
 
@@ -91,29 +95,32 @@ pub mod pdf_utils {
 
     pub struct TextBlock {
         pub text: String,
+        pub page: usize,
         pub x: f32,
         pub y: f32,
         pub width: f32,
         pub height: f32,
     }
 
-    pub fn extract_text_with_layout(path: &Path) -> Result<Vec<TextBlock>, PdfUtilsError> {
-        let bytes = std::fs::read(path)?;
-        let doc = pdf::file::FileOptions::cached()
-            .load(&bytes[..])
-            .map_err(|e| PdfUtilsError::from(format!("PDF loading error: {}", e)))?;
-
+    pub fn extract_text_with_layout(path: &Path) -> Result<Vec<TextBlock>, PdfError> {
+        let data = std::fs::read(path)?;
+        let file = FileOptions::cached().load(&data[..])?;
         let mut blocks = Vec::new();
 
-        for page in doc.pages() {
-            let page = page.map_err(|e| PdfUtilsError::from(format!("Page error: {}", e)))?;
-            if let Ok(text) = pdf_extract::extract_text_from_mem(&bytes) {
+        for (page_num, page) in file.pages().enumerate() {
+            let page = page?;
+            if let Some(content) = &page.contents {
+                // let content = content.decode::<Vec<u8>>()?;
+                // let content_str = String::from_utf8_lossy(&content);
+
+                // Simple text extraction - replace with proper PDF text extraction
                 blocks.push(TextBlock {
-                    text,
+                    text: format!("Page {}", page_num + 1),
+                    page: page_num,
                     x: 0.0,
                     y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
+                    width: 595.0,  // Default A4 width
+                    height: 842.0, // Default A4 height
                 });
             }
         }

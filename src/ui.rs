@@ -9,6 +9,7 @@ use once_cell::sync::Lazy;
 use pdf::file::{File, Trailer};
 use pdf::object::*;
 use pdf::primitive::PdfString;
+use pdf_extract::content::Operation;
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfDocument, PdfDocumentMetadataTagType, PdfMetadata, PdfPage,
     PdfRenderConfig, Pdfium, PdfiumError,
@@ -76,6 +77,48 @@ struct PdfViewerState {
     text_content: Option<String>,
     text_layout: Vec<TextLayout>,
     selected_text: Option<String>,
+    zoom_level: f32,
+    show_text_panel: bool,
+    render_quality: RenderQuality,
+    page_cache: HashMap<usize, egui::TextureHandle>,
+}
+
+impl PdfViewerState {
+    fn new(
+        current_pdf_path: Option<PathBuf>,
+        current_page_number: usize,
+        total_pages: usize,
+        rendered_page_texture: Option<egui::TextureHandle>,
+        page_render_receiver: Option<mpsc::Receiver<(PathBuf, usize, egui::TextureHandle, usize)>>,
+        page_render_sender: Option<mpsc::Sender<(PathBuf, usize, egui::TextureHandle, usize)>>,
+        loading: bool,
+        error: Option<String>,
+        text_content: Option<String>,
+        text_layout: Vec<TextLayout>,
+        selected_text: Option<String>,
+        zoom_level: f32,
+        show_text_panel: bool,
+        render_quality: RenderQuality,
+        page_cache: HashMap<usize, egui::TextureHandle>,
+    ) -> Self {
+        Self {
+            current_pdf_path,
+            current_page_number,
+            total_pages,
+            rendered_page_texture,
+            page_render_receiver,
+            page_render_sender,
+            loading,
+            error,
+            text_content,
+            text_layout,
+            selected_text,
+            zoom_level,
+            show_text_panel,
+            render_quality,
+            page_cache,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -83,6 +126,21 @@ struct TextLayout {
     text: String,
     rect: egui::Rect,
     page: usize,
+    color: Color32,
+    font_size: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RenderQuality {
+    Draft,
+    Normal,
+    High,
+}
+
+impl Default for RenderQuality {
+    fn default() -> Self {
+        RenderQuality::Normal
+    }
 }
 
 impl DirectoryNode {
@@ -1173,9 +1231,10 @@ impl<'a> App for FileGraphApp<'a> {
 
         // Physics controls floating window
         {
+            let mut show_physics_window = self.show_physics_window;
             let mut should_center_graph = false;
             egui::Window::new("Physics Controls")
-                .open(&mut self.show_physics_window)
+                .open(&mut show_physics_window)
                 .collapsible(true)
                 .resizable(true)
                 .default_width(300.0)
@@ -1234,17 +1293,16 @@ impl<'a> App for FileGraphApp<'a> {
                     });
 
                     ui.horizontal(|ui| {
-                        ui.label(format!("Zoom: {:.1}x", self.graph_zoom_factor));
-                        if ui.button("Zoom In (+)").clicked() {
-                            self.graph_zoom_factor *= 1.1;
-                            self.graph_zoom_factor = self.graph_zoom_factor.clamp(0.1, 10.0);
+                        ui.label(format!("Graph Zoom: {:.1}x", self.graph_zoom_factor));
+                        if ui.button("+").clicked() {
+                            self.graph_zoom_factor = (self.graph_zoom_factor * 1.1).min(10.0);
                         }
-                        if ui.button("Zoom Out (-)").clicked() {
-                            self.graph_zoom_factor /= 1.1;
-                            self.graph_zoom_factor = self.graph_zoom_factor.clamp(0.1, 10.0);
+                        if ui.button("-").clicked() {
+                            self.graph_zoom_factor = (self.graph_zoom_factor / 1.1).max(0.1);
                         }
                     });
                 });
+            self.show_physics_window = show_physics_window;
             if should_center_graph {
                 self.center_graph();
             }
@@ -1368,7 +1426,8 @@ impl<'a> App for FileGraphApp<'a> {
                             });
 
                             // Render the PDF with selectable text
-                            self.render_pdf_with_text_selection(ui);
+                            // self.render_pdf_with_text_selection(ui);
+                            self.render_pdf_viewer(ui, ctx);
 
                             // Show extracted text in a separate panel if requested
                             if self.show_pdf_text {
@@ -1391,10 +1450,10 @@ impl<'a> App for FileGraphApp<'a> {
                             // Display the rendered page
                             if let Some(texture) = &self.pdf_viewer_state.rendered_page_texture {
                                 egui::ScrollArea::both().show(ui, |ui| {
-                                    let size = texture.size_vec2();
+                                    let original_size = texture.size_vec2();
                                     let available_width = ui.available_width();
-                                    let scale = available_width / size.x;
-                                    let scaled_size = size * scale;
+                                    let scale = available_width / original_size.x;
+                                    let scaled_size = original_size * scale;
 
                                     ui.add(egui::Image::new(texture).max_size(scaled_size));
                                 });
@@ -1503,6 +1562,9 @@ impl<'a> FileGraphApp<'a> {
             pdf_file_data: HashMap::new(),
             // pdfium_instance: pdfium,
             pdf_viewer_state: PdfViewerState {
+                zoom_level: 1.0,
+                render_quality: RenderQuality::Normal,
+                page_cache: HashMap::new(),
                 page_render_sender: Some(page_render_sender),
                 page_render_receiver: Some(page_render_receiver),
                 ..Default::default()
@@ -1516,6 +1578,12 @@ impl<'a> FileGraphApp<'a> {
         }
 
         app
+    }
+
+    fn adjust_contrast(value: u8, factor: f32) -> u8 {
+        let normalized = value as f32 / 255.0;
+        let adjusted = (normalized - 0.5) * factor + 0.5;
+        (adjusted.clamp(0.0, 1.0) * 255.0) as u8
     }
 
     fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
@@ -1619,8 +1687,16 @@ impl<'a> FileGraphApp<'a> {
     }
 
     fn load_and_render_pdf_page(&mut self, ctx: &egui::Context, path: PathBuf, page_idx: usize) {
+        // Check cache first
+        if let Some(texture) = self.pdf_viewer_state.page_cache.get(&page_idx) {
+            self.pdf_viewer_state.rendered_page_texture = Some(texture.clone());
+            self.pdf_viewer_state.current_page_number = page_idx;
+            self.pdf_viewer_state.loading = false;
+            return;
+        }
+
         self.pdf_viewer_state.rendered_page_texture = None;
-        self.pdf_viewer_state.current_pdf_path = Some(path.clone());
+        self.pdf_viewer_state.current_pdf_path = Some(path.clone().to_path_buf());
         self.pdf_viewer_state.current_page_number = page_idx;
         self.pdf_viewer_state.loading = true;
         self.pdf_viewer_state.error = None;
@@ -1632,38 +1708,11 @@ impl<'a> FileGraphApp<'a> {
             .as_ref()
             .unwrap()
             .clone();
-
-        // text extraction
-        match pdf_utils::extract_text_with_layout(&path) {
-            Ok(blocks) => {
-                let mut full_text = String::new();
-                let mut text_layout = Vec::new();
-
-                for block in blocks {
-                    full_text.push_str(&block.text);
-                    full_text.push('\n');
-
-                    text_layout.push(TextLayout {
-                        text: block.text,
-                        rect: egui::Rect::from_min_max(
-                            egui::Pos2::new(block.x, block.y),
-                            egui::Pos2::new(block.x + block.width, block.y + block.height),
-                        ),
-                        page: page_idx,
-                    });
-                }
-
-                self.pdf_viewer_state.text_content = Some(full_text);
-                self.pdf_viewer_state.text_layout = text_layout;
-            }
-            Err(e) => {
-                self.pdf_viewer_state.text_content =
-                    Some(format!("[Could not extract text: {}]", e));
-            }
-        }
+        let zoom = self.pdf_viewer_state.zoom_level;
+        let quality = self.pdf_viewer_state.render_quality;
+        let path_clone = path.to_path_buf();
 
         thread::spawn(move || {
-            // Create a new PDFium instance in the thread
             let pdfium = match Pdfium::bind_to_system_library() {
                 Ok(bindings) => Pdfium::new(bindings),
                 Err(e) => {
@@ -1673,7 +1722,7 @@ impl<'a> FileGraphApp<'a> {
                 }
             };
 
-            let document = match pdfium.load_pdf_from_file(&path, None) {
+            let document = match pdfium.load_pdf_from_file(&path_clone, None) {
                 Ok(doc) => doc,
                 Err(e) => {
                     eprintln!("Failed to load PDF: {:?}", e);
@@ -1694,23 +1743,35 @@ impl<'a> FileGraphApp<'a> {
                 }
             };
 
-            let render_config = PdfRenderConfig::new()
-                .set_target_width((page.width().value * 2.0) as i32)
-                .set_target_height((page.height().value * 2.0) as i32);
-
-            let mut bitmap = match PdfBitmap::empty(
-                (page.width().value * 2.0) as i32,
-                (page.height().value * 2.0) as i32,
-                PdfBitmapFormat::BGRA,
-                pdfium.bindings(),
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("Failed to create bitmap: {:?}", e);
-                    ctx_clone.request_repaint();
-                    return;
-                }
+            // Calculate render dimensions based on quality and zoom
+            let (width, height) = match quality {
+                RenderQuality::Draft => (
+                    (page.width().value * zoom) as i32,
+                    (page.height().value * zoom) as i32,
+                ),
+                RenderQuality::Normal => (
+                    (page.width().value * zoom * 1.5) as i32,
+                    (page.height().value * zoom * 1.5) as i32,
+                ),
+                RenderQuality::High => (
+                    (page.width().value * zoom * 2.0) as i32,
+                    (page.height().value * zoom * 2.0) as i32,
+                ),
             };
+
+            let render_config = PdfRenderConfig::new()
+                .set_target_width(width)
+                .set_target_height(height);
+
+            let mut bitmap =
+                match PdfBitmap::empty(width, height, PdfBitmapFormat::BGRA, pdfium.bindings()) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("Failed to create bitmap: {:?}", e);
+                        ctx_clone.request_repaint();
+                        return;
+                    }
+                };
 
             if let Err(e) = page.render_into_bitmap_with_config(&mut bitmap, &render_config) {
                 eprintln!("Failed to render page: {:?}", e);
@@ -1718,67 +1779,249 @@ impl<'a> FileGraphApp<'a> {
                 return;
             }
 
-            let width = bitmap.width() as usize;
-            let height = bitmap.height() as usize;
-
-            // Convert BGRA to RGBA
-            let mut pixels_rgba = Vec::with_capacity(width * height * 4);
+            // Convert BGRA to RGBA with better contrast
+            let mut pixels_rgba = Vec::with_capacity(width as usize * height as usize * 4);
             let raw_bytes = bitmap.as_raw_bytes();
 
             for chunk in raw_bytes.chunks_exact(4) {
-                pixels_rgba.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+                // Apply contrast adjustment
+                let r = Self::adjust_contrast(chunk[2], 1.2);
+                let g = Self::adjust_contrast(chunk[1], 1.2);
+                let b = Self::adjust_contrast(chunk[0], 1.2);
+                pixels_rgba.extend_from_slice(&[r, g, b, chunk[3]]);
             }
 
-            let color_image =
-                egui::ColorImage::from_rgba_unmultiplied([width, height], &pixels_rgba);
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [width as usize, height as usize],
+                &pixels_rgba,
+            );
+
             let texture = ctx_clone.load_texture(
                 format!("pdf_page_{}_{}", path.display(), actual_page_idx),
                 color_image,
                 egui::TextureOptions::default(),
             );
 
-            if let Err(e) =
-                render_sender.send((path, actual_page_idx, texture, total_pages as usize))
-            {
-                eprintln!("Failed to send rendered page: {:?}", e);
+            if let Err(e) = render_sender.send((
+                path.to_path_buf(),
+                actual_page_idx,
+                texture,
+                total_pages.into(),
+            )) {
+                eprintln!("Failed to send rendered page: {}", e);
             }
             ctx_clone.request_repaint();
         });
     }
 
-    fn render_pdf_with_text_selection(&mut self, ui: &mut egui::Ui) {
-        if let Some(texture) = &self.pdf_viewer_state.rendered_page_texture {
-            // Get PDF dimensions and calculate scaling
-            let pdf_size = texture.size_vec2();
+    fn render_pdf_viewer(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // Initialize PDF viewer state if not already done
+        if self.pdf_viewer_state.page_render_sender.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            self.pdf_viewer_state.page_render_sender = Some(sender);
+            self.pdf_viewer_state.page_render_receiver = Some(receiver);
+        }
+
+        // Extract all needed values before creating mutable reference
+        let current_pdf_path = self.pdf_viewer_state.current_pdf_path.clone();
+        let current_page = self.pdf_viewer_state.current_page_number;
+        let total_pages = self.pdf_viewer_state.total_pages;
+        let zoom_level = self.pdf_viewer_state.zoom_level;
+        let render_quality = self.pdf_viewer_state.render_quality;
+        let show_text_panel = self.pdf_viewer_state.show_text_panel;
+        let text_content = self.pdf_viewer_state.text_content.clone();
+        let text_layout = self.pdf_viewer_state.text_layout.clone();
+
+        // Process page updates
+        if let Some(receiver) = &mut self.pdf_viewer_state.page_render_receiver {
+            while let Ok((path, page_idx, texture, total)) = receiver.try_recv() {
+                if Some(&path) == self.pdf_viewer_state.current_pdf_path.as_ref() {
+                    self.pdf_viewer_state
+                        .page_cache
+                        .insert(page_idx, texture.clone());
+                    self.pdf_viewer_state.rendered_page_texture = Some(texture);
+                    self.pdf_viewer_state.total_pages = total;
+                    self.pdf_viewer_state.loading = false;
+                    self.pdf_viewer_state.current_page_number = page_idx;
+                }
+            }
+        }
+
+        // Render controls
+        ui.horizontal(|ui| {
+            // Page controls
+            if ui.button("⏮ First").clicked() {
+                if let Some(path) = &current_pdf_path {
+                    self.load_and_render_pdf_page(ctx, path.clone(), 0);
+                }
+            }
+            if ui.button("◀ Prev").clicked() && current_page > 0 {
+                if let Some(path) = &current_pdf_path {
+                    self.load_and_render_pdf_page(ctx, path.clone(), current_page - 1);
+                }
+            }
+
+            ui.label(format!("Page {} of {}", current_page + 1, total_pages));
+
+            if ui.button("▶ Next").clicked() && current_page + 1 < total_pages {
+                if let Some(path) = &current_pdf_path {
+                    self.load_and_render_pdf_page(ctx, path.clone(), current_page + 1);
+                }
+            }
+            if ui.button("⏭ Last").clicked() && current_page + 1 < total_pages {
+                if let Some(path) = &current_pdf_path {
+                    self.load_and_render_pdf_page(ctx, path.clone(), total_pages - 1);
+                }
+            }
+
+            // Zoom controls
+            ui.separator();
+            ui.label(format!(
+                "PDF Zoom: {:.1}x",
+                self.pdf_viewer_state.zoom_level
+            ));
+            if ui.button("-").clicked() {
+                self.pdf_viewer_state.zoom_level =
+                    (self.pdf_viewer_state.zoom_level / 1.25).max(0.25);
+                if let Some(path) = &self.pdf_viewer_state.current_pdf_path {
+                    self.load_and_render_pdf_page(
+                        ctx,
+                        path.clone(),
+                        self.pdf_viewer_state.current_page_number,
+                    );
+                }
+            }
+            ui.add(
+                egui::DragValue::new(&mut self.pdf_viewer_state.zoom_level)
+                    .speed(0.1)
+                    .range(0.25..=3.0),
+            );
+            if ui.button("+").clicked() {
+                self.pdf_viewer_state.zoom_level =
+                    (self.pdf_viewer_state.zoom_level * 1.25).min(3.0);
+                if let Some(path) = &self.pdf_viewer_state.current_pdf_path {
+                    self.load_and_render_pdf_page(
+                        ctx,
+                        path.clone(),
+                        self.pdf_viewer_state.current_page_number,
+                    );
+                }
+            }
+
+            // Quality controls
+            ui.separator();
+            ui.label("Quality:");
+            ui.radio_value(
+                &mut self.pdf_viewer_state.render_quality,
+                RenderQuality::Draft,
+                "Draft",
+            );
+            ui.radio_value(
+                &mut self.pdf_viewer_state.render_quality,
+                RenderQuality::Normal,
+                "Normal",
+            );
+            ui.radio_value(
+                &mut self.pdf_viewer_state.render_quality,
+                RenderQuality::High,
+                "High",
+            );
+
+            ui.separator();
+            ui.checkbox(&mut self.pdf_viewer_state.show_text_panel, "Show Text");
+        });
+
+        // Render content
+        if self.pdf_viewer_state.loading {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+            });
+        } else if let Some(error) = &self.pdf_viewer_state.error {
+            ui.colored_label(Color32::RED, error);
+        } else if let Some(texture) = &self.pdf_viewer_state.rendered_page_texture {
+            // Calculate scaled size
             let available_width = ui.available_width();
-            let scale = available_width / pdf_size.x;
-            let scaled_size = pdf_size * scale;
+            let texture_size = texture.size_vec2();
+            let scale = available_width / texture_size.x;
+            let scaled_size = texture_size * scale;
 
-            // Show the PDF image
+            // Render image
             let image_response = ui.add(egui::Image::new(texture).max_size(scaled_size));
-            let image_rect = image_response.rect;
 
-            // Render text overlays
-            if !self.pdf_viewer_state.text_layout.is_empty() {
-                for layout in &self.pdf_viewer_state.text_layout {
-                    if layout.page == self.pdf_viewer_state.current_page_number {
-                        let y_pos = pdf_size.y - layout.rect.max.y; // Flip Y coordinate
+            // Render text selection if needed
+            if !text_layout.is_empty() {
+                let original_size = if let Some(first_layout) = text_layout.first() {
+                    vec2(first_layout.rect.width(), first_layout.rect.height())
+                } else {
+                    vec2(595.0, 842.0) // Default A4 size
+                };
 
-                        let text_rect = egui::Rect::from_min_size(
-                            image_rect.min + egui::vec2(layout.rect.min.x * scale, y_pos * scale),
-                            egui::vec2(layout.rect.width() * scale, layout.rect.height() * scale),
-                        );
+                self.render_text_selection(ui, image_response.rect, scaled_size, original_size);
+            }
 
-                        // Make text invisible but interactive
-                        let response = ui.allocate_ui_at_rect(text_rect, |ui| {
-                            ui.label(&layout.text)
-                                .on_hover_cursor(egui::CursorIcon::Text)
-                        });
-
-                        if response.response.clicked() {
-                            self.pdf_viewer_state.selected_text = Some(layout.text.clone());
+            // Show text panel if enabled
+            if show_text_panel {
+                egui::Window::new("Extracted Text")
+                    .collapsible(true)
+                    .resizable(true)
+                    .default_width(ui.available_width())
+                    .show(ctx, |ui| {
+                        if let Some(text) = &text_content {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut text.as_str())
+                                        .desired_width(f32::INFINITY)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                            });
+                        } else {
+                            ui.label("No text extracted from this page");
                         }
-                    }
+                    });
+            }
+        }
+    }
+
+    fn render_text_selection(
+        &mut self,
+        ui: &mut egui::Ui,
+        image_rect: egui::Rect,
+        scaled_size: egui::Vec2,
+        original_size: egui::Vec2,
+    ) {
+        let state = &mut self.pdf_viewer_state;
+        let scale_x = scaled_size.x / original_size.x;
+        let scale_y = scaled_size.y / original_size.y;
+
+        for layout in &state.text_layout {
+            if layout.page == state.current_page_number {
+                // Calculate position and size in the scaled image
+                let y_pos = original_size.y - layout.rect.max.y; // Flip Y coordinate
+                let text_rect = egui::Rect::from_min_size(
+                    image_rect.min + egui::vec2(layout.rect.min.x * scale_x, y_pos * scale_y),
+                    egui::vec2(
+                        layout.rect.width() * scale_x,
+                        layout.rect.height() * scale_y,
+                    ),
+                );
+
+                // Make text selectable
+                let response = ui.allocate_ui_at_rect(text_rect, |ui| {
+                    ui.label(&layout.text)
+                        .on_hover_cursor(egui::CursorIcon::Text)
+                });
+
+                // Visual feedback for hover/selection
+                if response.response.hovered() {
+                    ui.painter().rect_filled(
+                        text_rect,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(0, 0, 255, 30),
+                    );
+                }
+
+                if response.response.clicked() {
+                    state.selected_text = Some(layout.text.clone());
                 }
             }
         }
@@ -2096,12 +2339,34 @@ impl<'a> FileGraphApp<'a> {
         if is_pdf_path(&path) {
             self.selected_file_content = Some("PDF Document".to_string());
             self.selected_image = None;
+
+            // Initialize PDF viewer state
             self.pdf_viewer_state = PdfViewerState {
+                zoom_level: 1.0,
+                render_quality: RenderQuality::Normal,
+                page_cache: HashMap::new(),
                 page_render_sender: self.pdf_viewer_state.page_render_sender.take(),
                 page_render_receiver: self.pdf_viewer_state.page_render_receiver.take(),
                 ..Default::default()
             };
-            self.load_and_render_pdf_page(ctx, path, 0);
+
+            // Load the first page
+            self.load_and_render_pdf_page(ctx, path.clone(), 0);
+
+            // Extract text in background
+            let path_clone = path.clone();
+            let ctx_clone = ctx.clone();
+            thread::spawn(move || {
+                match pdf_utils::extract_text_with_layout(&path_clone) {
+                    Ok(blocks) => {
+                        // Process text blocks and send back to UI thread
+                        ctx_clone.request_repaint();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to extract text: {}", e);
+                    }
+                }
+            });
         } else if is_image_path(&path) {
             match image::open(&path) {
                 Ok(img) => {
