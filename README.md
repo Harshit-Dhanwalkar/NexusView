@@ -37,6 +37,8 @@ cp pdfium/lib/libpdfium.so /target/debug/
 cargo run --release -- /path/to/your/directory
 ```
 
+Note: when `cargo clean` is done, object file placed in `/target/debug/` get's removed so you need to put it again.
+
 # Testing
 
 For testing you can test on `dummy_dir` in the repo.
