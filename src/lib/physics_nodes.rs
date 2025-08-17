@@ -5,7 +5,7 @@ use petgraph::stable_graph::StableGraph;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-use crate::graph::GraphNode;
+use crate::lib::graph::GraphNode;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhysicsNode {

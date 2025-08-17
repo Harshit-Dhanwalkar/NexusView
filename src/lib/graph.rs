@@ -1,5 +1,5 @@
 // src/graph.rs
-use crate::file_scan;
+use crate::lib::file_scan;
 use petgraph::stable_graph::StableGraph;
 use petgraph::{Graph, graph::NodeIndex};
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ impl FileGraph {
 
         // Add all images as nodes
         for path in &scanner.images {
-            if !self.node_indices.contains_key(path) {
+            if !self.node_indices.contains_key(path.as_path()) {
                 let node_data = GraphNode::File(path.display().to_string());
                 let node_idx = self.graph.add_node(node_data);
                 self.node_indices.insert(path.clone(), node_idx);
@@ -95,7 +95,7 @@ impl TagGraph {
 
         // Add all images
         for image_path in &scanner.images {
-            if !self.image_node_indices.contains_key(image_path) {
+            if !self.image_node_indices.contains_key(image_path.as_path()) {
                 let node_data = GraphNode::File(image_path.display().to_string());
                 let node_idx = self.graph.add_node(node_data);
                 self.image_node_indices.insert(image_path.clone(), node_idx);

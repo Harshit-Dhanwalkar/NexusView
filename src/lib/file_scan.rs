@@ -1,5 +1,5 @@
 // src/file_scan.rs
-use crate::utils::{is_image_path, is_pdf_path};
+use crate::lib::utils::{is_image_path, is_pdf_path};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;

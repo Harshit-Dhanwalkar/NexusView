@@ -29,10 +29,10 @@ use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-use crate::file_scan::FileScanner;
-use crate::graph::{FileGraph, GraphNode, TagGraph};
-use crate::physics_nodes::PhysicsSimulator;
-use crate::utils::{
+use crate::lib::file_scan::FileScanner;
+use crate::lib::graph::{FileGraph, GraphNode, TagGraph};
+use crate::lib::physics_nodes::PhysicsSimulator;
+use crate::lib::utils::{
     is_code_path, is_image_path, is_markdown_path, is_pdf_path, pdf_utils, rotate_vec2,
 };
 
