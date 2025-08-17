@@ -6,16 +6,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+/// Scans directories and extracts file relationships and tags
 pub struct FileScanner {
     root_path: PathBuf,
     current_scan_path: PathBuf,
     pub show_hidden: bool,
-    pub files: HashMap<PathBuf, Vec<PathBuf>>,
-    pub images: Vec<PathBuf>,
-    pub tags: HashMap<PathBuf, Vec<String>>,
+    pub files: HashMap<PathBuf, Vec<PathBuf>>, // Maps files to their links
+    pub images: Vec<PathBuf>,                  // List of image files
+    pub tags: HashMap<PathBuf, Vec<String>>,   // Maps files to their tags
 }
 
 impl FileScanner {
+    /// Creates a new FileScanner for the given root directory
     pub fn new(root_path: impl AsRef<Path>) -> Self {
         let path = root_path.as_ref().to_path_buf();
         Self {
@@ -36,6 +38,7 @@ impl FileScanner {
         &self.root_path
     }
 
+    /// Scans a directory with progress reporting
     pub fn scan_directory_with_progress(
         &mut self,
         path: &Path,
@@ -104,6 +107,7 @@ impl FileScanner {
         Ok(())
     }
 
+    /// Processes an individual file to extract links and tags
     fn process_file(&mut self, path: &Path) -> Result<(), String> {
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {

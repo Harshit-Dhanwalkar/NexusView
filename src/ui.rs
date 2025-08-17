@@ -1419,10 +1419,10 @@ impl<'a> App for FileGraphApp<'a> {
                                         );
                                     }
                                 }
-                                // Add a button to show extracted text
-                                if ui.button("Show Text").clicked() {
-                                    self.show_pdf_text = true;
-                                }
+                                // button to show extracted text
+                                // if ui.button("Show Text").clicked() {
+                                //     self.show_pdf_text = true;
+                                // }
                             });
 
                             // Render the PDF with selectable text
