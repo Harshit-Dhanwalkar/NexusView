@@ -26,12 +26,24 @@ NexusView is a desktop application built with Rust and the `egui` framework, des
 ```bash
 git clone https://github.com/Harshit-Dhanwalkar/NexusView.git
 cd NexusView
-cargo run --release -- /path/to/your/directory
 ```
 
 ## PDF Rendering
 
-NexusView renders PDF content by utilizing the pdfium binaries. To enable PDF preview, you need to download the pdfium-binaries from `https://github.com/bblanchon/pdfium-binaries/releases` and grab appropriate binary for your system (for linux I have used `pdfium-v8-linux-x64.tgz`) and then copy the extracted binaries into from `pdfium/lib/libpdfium.so` to `/target/debug/` or for system-wide `/usr/lib/` directory.
+NexusView renders PDF content by utilizing the pdfium binaries. To enable PDF preview, you need to download the pdfium-binaries from `https://github.com/bblanchon/pdfium-binaries/releases` and grab appropriate binary for your system (for linux I have used `pdfium-v8-linux-x64.tgz`) and then copy the extracted binaries from `pdfium/lib/libpdfium.so` to `/target/debug/` or for system-wide `/usr/lib/` directory.
+
+```bash
+cp pdfium/lib/libpdfium.so /target/debug/
+cargo run --release -- /path/to/your/directory
+```
+
+# Testing
+
+For testing you can test on `dummy_dir` in the repo.
+
+```bash
+cargo run --release -- dummy_dir
+```
 
 ---
 
