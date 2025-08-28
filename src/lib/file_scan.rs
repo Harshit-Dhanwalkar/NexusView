@@ -1,10 +1,11 @@
 // src/file_scan.rs
-use crate::lib::utils::{is_image_path, is_pdf_path};
+use crate::lib::utils::{is_3d_object_path, is_image_path, is_pdf_path};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender, TryRecvError};
 
 /// Scans directories and extracts file relationships and tags
 pub struct FileScanner {
@@ -13,6 +14,7 @@ pub struct FileScanner {
     pub show_hidden: bool,
     pub files: HashMap<PathBuf, Vec<PathBuf>>, // Maps files to their links
     pub images: Vec<PathBuf>,                  // List of image files
+    pub objects: Vec<PathBuf>,                 // List of 3D object files
     pub tags: HashMap<PathBuf, Vec<String>>,   // Maps files to their tags
 }
 
@@ -26,6 +28,7 @@ impl FileScanner {
             show_hidden: false,
             files: HashMap::new(),
             images: Vec::new(),
+            objects: Vec::new(),
             tags: HashMap::new(),
         }
     }
@@ -43,9 +46,13 @@ impl FileScanner {
         &mut self,
         path: &Path,
         progress_sender: Sender<(f32, String)>,
-    ) -> Result<(), String> {
+        // ) -> Result<(), String> {
+    ) -> Result<(), std::io::Error> {
         if !path.is_dir() {
-            return Err(format!("Path is not a directory: {:?}", path));
+            return Err(IoError::new(
+                ErrorKind::NotFound,
+                format!("Path is not a directory: {:?}", path),
+            ));
         }
 
         self.current_scan_path = path.to_path_buf();
@@ -55,60 +62,75 @@ impl FileScanner {
         self.tags.retain(|k, _| !k.starts_with(path));
         self.images.retain(|k| !k.starts_with(path));
 
-        let entries: Vec<_> = fs::read_dir(path)
-            .map_err(|e| e.to_string())?
-            .filter_map(|e| e.ok())
-            .collect();
-
-        let total = entries.len();
+        // let entries: Vec<_> = fs::read_dir(path)
+        //     .map_err(|e| e.to_string())?
+        //     .filter_map(|e| e.ok())
+        //     .collect();
+        let entries: Vec<_> = fs::read_dir(path)?.collect();
+        let total_entries = entries.len();
         for (i, entry) in entries.into_iter().enumerate() {
+            let entry = entry?;
             let path = entry.path();
-            if !self.show_hidden
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map_or(false, |name| name.starts_with('.'))
-            {
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+            if file_name.starts_with('.') && !self.show_hidden {
                 continue; // Skip hidden files if show_hidden is false
             }
 
-            let progress = (i as f32) / (total as f32);
-            progress_sender
-                .send((progress, format!("Scanning: {}", path.display())))
-                .map_err(|e| e.to_string())?;
+            let progress = (i as f32) / (total_entries as f32);
+            let status = format!("Scanning: {}", path.display());
+            if let Err(e) = progress_sender.send((progress, status)) {
+                return Err(IoError::new(
+                    ErrorKind::Other,
+                    format!("Failed to send progress update: {}", e),
+                ));
+            }
 
             // If a directory, recursively scan it
             if path.is_dir() {
                 self.scan_directory_with_progress(&path, progress_sender.clone())?;
-            } else {
-                self.process_file(&path)?;
+            } else if path.is_file() {
+                if is_image_path(&path) {
+                    self.files.insert(path.clone(), Vec::new());
+                    self.images.push(path.clone());
+                } else if is_pdf_path(&path) {
+                    self.files.insert(path.clone(), Vec::new());
+                } else if is_3d_object_path(&path) {
+                    self.files.insert(path.clone(), Vec::new());
+                    self.objects.push(path.clone());
+                } else if let Ok(content) = fs::read_to_string(&path) {
+                    self.process_file(&path, &content)?;
+                }
             }
         }
 
         // Resolve links after scanning
-        let mut resolved_files = HashMap::new();
-        for (file_path, links) in &self.files {
-            let mut resolved_links_for_file = Vec::new();
-            for link in links {
-                let resolved_link = if link.is_relative() {
-                    self.current_scan_path.join(link)
-                } else {
-                    link.clone()
-                };
-                resolved_links_for_file.push(resolved_link);
-            }
-            resolved_files.insert(file_path.clone(), resolved_links_for_file);
-        }
-        self.files = resolved_files;
+        // let mut resolved_files = HashMap::new();
+        // for (file_path, links) in &self.files {
+        //     let mut resolved_links_for_file = Vec::new();
+        //     for link in links {
+        //         let resolved_link = if link.is_relative() {
+        //             self.current_scan_path.join(link)
+        //         } else {
+        //             link.clone()
+        //         };
+        //         resolved_links_for_file.push(resolved_link);
+        //     }
+        //     resolved_files.insert(file_path.clone(), resolved_links_for_file);
+        // }
+        // self.files = resolved_files;
 
-        progress_sender
-            .send((1.0, "Scan complete".to_string()))
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = progress_sender.send((1.0, "Scan complete".to_string())) {
+            return Err(IoError::new(
+                ErrorKind::Other,
+                format!("Failed to send final progress update: {}", e),
+            ));
+        }
+
         Ok(())
     }
 
     /// Processes an individual file to extract links and tags
-    fn process_file(&mut self, path: &Path) -> Result<(), String> {
+    fn process_file(&mut self, path: &Path, content: &str) -> Result<(), io::Error> {
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if is_image_path(path) {
@@ -116,6 +138,9 @@ impl FileScanner {
                     self.images.push(path.to_path_buf());
                 } else if is_pdf_path(path) {
                     self.files.insert(path.to_path_buf(), Vec::new());
+                } else if is_3d_object_path(path) {
+                    self.files.insert(path.to_path_buf(), Vec::new());
+                    self.objects.push(path.to_path_buf());
                 } else if let Ok(content) = fs::read_to_string(path) {
                     let mut links = Vec::new();
                     let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+)\)|\[\[([^\]]+)\]\]").unwrap();

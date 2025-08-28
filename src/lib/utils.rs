@@ -14,6 +14,13 @@ pub fn is_markdown_path(path: &Path) -> bool {
     })
 }
 
+pub fn is_3d_object_path(path: &Path) -> bool {
+    path.extension().map_or(false, |ext| {
+        let ext_lower = ext.to_str().unwrap_or("").to_lowercase();
+        ["glb", "usdz"].contains(&ext_lower.as_str())
+    })
+}
+
 pub fn is_code_path(path: &Path) -> bool {
     path.extension().map_or(false, |ext| {
         let ext_lower = ext.to_str().unwrap_or("").to_lowercase();
