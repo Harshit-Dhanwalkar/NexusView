@@ -1,10 +1,21 @@
 // src/ui.rs
+use crate::lib::file_scan::FileScanner;
+use crate::lib::graph::{FileGraph, GraphNode, TagGraph};
+use crate::lib::physics_nodes::PhysicsSimulator;
+use crate::lib::utils::{
+    is_3d_object_path, is_code_path, is_image_path, is_markdown_path, is_pdf_path, pdf_utils,
+    rotate_vec2,
+};
+use crate::lib::viewer::GltfViewer;
 use chrono::NaiveDateTime;
 use eframe::{App, egui};
+use egui::mutex::Mutex;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Sense, Slider, Stroke, pos2, vec2};
 use egui_commonmark::CommonMarkViewer;
+use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_wgpu::{WgpuConfiguration, wgpu};
+use glam::Quat;
 use image::ImageFormat;
 use once_cell::sync::Lazy;
 use pdf::file::{File, Trailer};
@@ -21,21 +32,14 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc}; // Mutex
 use std::thread;
 use std::time::Instant;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
-
-use crate::lib::file_scan::FileScanner;
-use crate::lib::graph::{FileGraph, GraphNode, TagGraph};
-use crate::lib::physics_nodes::PhysicsSimulator;
-use crate::lib::utils::{
-    is_3d_object_path, is_code_path, is_image_path, is_markdown_path, is_pdf_path, pdf_utils,
-    rotate_vec2,
-};
+use wgpu::{Device, Queue, SurfaceConfiguration};
 
 // Lazy-loaded syntax set and theme
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(|| SyntaxSet::load_defaults_newlines());
@@ -258,6 +262,13 @@ pub struct FileGraphApp<'a> {
     pdf_file_data: HashMap<PathBuf, FileData<'a>>,
     show_pdf_text: bool,
     selected_text: Option<String>,
+    egui_wgpu_render_state: Option<egui_wgpu::RenderState>,
+    gltf_viewer: Option<GltfViewer>,
+    wgpu_renderer: Option<Renderer>,
+    device: Option<Arc<Device>>,
+    queue: Option<Arc<Queue>>,
+    surface_config: Option<SurfaceConfiguration>,
+    show_3d_viewer: bool,
 }
 
 // Structure to hold parsed PDF data
@@ -305,7 +316,7 @@ impl<'a> App for FileGraphApp<'a> {
 
         // Update graph building progress
         {
-            let scanner_locked = self.scanner.lock().unwrap();
+            let scanner_locked = self.scanner.lock();
 
             self.graph_build_progress = 0.0;
             self.graph_build_status = "Building file graph...".to_string();
@@ -392,22 +403,14 @@ impl<'a> App for FileGraphApp<'a> {
                     .checkbox(&mut self.show_hidden_files, "Show Hidden Files")
                     .changed()
                 {
-                    if let Ok(mut scanner_guard) = self.scanner.lock() {
+                    let scan_dir = {
+                        let mut scanner_guard = self.scanner.lock();
                         scanner_guard.set_show_hidden(self.show_hidden_files);
-                    } else {
-                        eprintln!("Failed to lock scanner mutex when setting show_hidden.");
-                        return;
-                    }
-
+                        scanner_guard.current_scan_path.clone()
+                    };
                     // Trigger a rescan of the currently selected directory
-                    if !self.is_scanning {
-                        let scan_dir = self
-                            .selected_directory
-                            .clone()
-                            .unwrap_or_else(|| self.scan_dir.clone());
-                        self.current_scan_dir = scan_dir.clone();
-                        self.trigger_scan(scan_dir, ctx);
-                    }
+                    self.current_scan_dir = scan_dir.clone();
+                    self.trigger_scan(scan_dir, ctx);
                 }
 
                 ui.separator();
@@ -431,7 +434,7 @@ impl<'a> App for FileGraphApp<'a> {
                     let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
 
                     thread::spawn(move || {
-                        let mut scanner = scanner_arc_clone.lock().unwrap();
+                        let mut scanner = scanner_arc_clone.lock();
                         if let Err(e) =
                             scanner.scan_directory_with_progress(&scan_dir, progress_sender)
                         {
@@ -638,14 +641,14 @@ impl<'a> App for FileGraphApp<'a> {
                 }
 
                 {
-                    let scanner_locked = self.scanner.lock().unwrap();
+                    let scanner_locked = self.scanner.lock();
                     self.file_graph.build_from_scanner(&scanner_locked);
                     self.tag_graph.build_from_tags(&scanner_locked);
                 }
 
                 // node filtering logic:
                 let (nodes_to_draw, edges_to_draw) = {
-                    let scanner_locked = self.scanner.lock().unwrap();
+                    let scanner_locked = self.scanner.lock();
 
                     match self.current_graph_mode {
                         GraphMode::Links => {
@@ -864,7 +867,7 @@ impl<'a> App for FileGraphApp<'a> {
                                 },
                                 GraphMode::Tags => match &self.tag_graph.graph[node_idx] {
                                     GraphNode::File(path) => {
-                                        let scanner_locked = self.scanner.lock().unwrap();
+                                        let scanner_locked = self.scanner.lock();
                                         let has_tags =
                                             scanner_locked.tags.contains_key(Path::new(path));
                                         let is_image = is_image_path(Path::new(path));
@@ -1094,14 +1097,22 @@ impl<'a> App for FileGraphApp<'a> {
                                     if let GraphNode::File(file_path_str) =
                                         &self.file_graph.graph[node_idx]
                                     {
-                                        self.try_load_file_content(file_path_str.into(), ctx);
+                                        self.try_load_file_content(
+                                            file_path_str.into(),
+                                            ctx,
+                                            frame,
+                                        );
                                     }
                                 }
                                 GraphMode::Tags => {
                                     if let GraphNode::File(file_path_str) =
                                         &self.tag_graph.graph[node_idx]
                                     {
-                                        self.try_load_file_content(file_path_str.into(), ctx);
+                                        self.try_load_file_content(
+                                            file_path_str.into(),
+                                            ctx,
+                                            frame,
+                                        );
                                     }
                                 }
                             }
@@ -1472,8 +1483,16 @@ impl<'a> App for FileGraphApp<'a> {
                         ui.label(format!("3D Object: {}", path.display()));
                         ui.separator();
 
-                        ui.heading("3D Object Viewer");
-                        ui.label("Rendering 3D model here...");
+                        if self.show_3d_viewer {
+                            self.render_3d_viewer(ui, ctx, frame);
+                        } else {
+                            ui.heading("3D Object Viewer");
+                            ui.label("Click to load 3D model...");
+
+                            if ui.button("Load 3D Model").clicked() {
+                                self.try_load_file_content(path.clone(), ctx, frame);
+                            }
+                        }
                     } else {
                         ui.label("Select a file node to view its content.");
                     }
@@ -1564,6 +1583,13 @@ impl<'a> FileGraphApp<'a> {
             },
             show_pdf_text: false,
             selected_text: None,
+            egui_wgpu_render_state: None,
+            gltf_viewer: None,
+            wgpu_renderer: None,
+            device: None,
+            queue: None,
+            surface_config: None,
+            show_3d_viewer: false,
         };
 
         if let Some(initial_scan_path) = app.selected_directory.clone() {
@@ -1616,18 +1642,7 @@ impl<'a> FileGraphApp<'a> {
                 return;
             }
 
-            match scanner_arc_clone.lock() {
-                Ok(mut scanner_guard) => {
-                    scanner_guard.set_show_hidden(show_hidden_clone);
-                    match scanner_guard.scan_directory_with_progress(&path_to_scan, progress_sender)
-                    {
-                        Ok(_) => println!("Scan completed successfully"),
-                        Err(e) => eprintln!("Scan error: {}", e),
-                    }
-                }
-                Err(e) => eprintln!("Failed to lock scanner: {}", e),
-            }
-
+            let scanner_guard = scanner_arc_clone.lock();
             ctx_clone.request_repaint();
         }));
     }
@@ -2046,7 +2061,7 @@ impl<'a> FileGraphApp<'a> {
                 if let Ok(entries) = fs::read_dir(&node.path) {
                     for entry in entries.filter_map(|e| e.ok()) {
                         let path = entry.path();
-                        if !self.scanner.lock().unwrap().show_hidden
+                        if !self.scanner.lock().show_hidden
                             && path
                                 .file_name()
                                 .map_or(false, |name| name.to_string_lossy().starts_with("."))
@@ -2136,6 +2151,7 @@ impl<'a> FileGraphApp<'a> {
             }
         });
     }
+
     // Helper function to clear graph data
     fn clear_graph_data(&mut self) {
         // Clear physics data
@@ -2190,10 +2206,7 @@ impl<'a> FileGraphApp<'a> {
         self.graph_build_progress = 0.0;
         self.graph_build_status = "Building graphs...".to_string();
 
-        let scanner_guard = match self.scanner.lock() {
-            Ok(guard) => guard,
-            Err(_) => return Err("Failed to lock scanner".to_string()),
-        };
+        let scanner_guard = self.scanner.lock();
 
         // Clear old graphs before rebuilding
         self.file_graph.graph.clear();
@@ -2284,7 +2297,7 @@ impl<'a> FileGraphApp<'a> {
             let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
 
             thread::spawn(move || {
-                let mut scanner = scanner_arc_clone.lock().unwrap();
+                let mut scanner = scanner_arc_clone.lock();
                 // Clear previous results before scanning new directories
                 scanner.files.clear();
                 scanner.tags.clear();
@@ -2302,9 +2315,9 @@ impl<'a> FileGraphApp<'a> {
             self.scan_progress_receiver = Some(progress_receiver);
         } else {
             // If no directories selected, clear everything
-            self.scanner.lock().unwrap().files.clear();
-            self.scanner.lock().unwrap().tags.clear();
-            self.scanner.lock().unwrap().images.clear();
+            self.scanner.lock().files.clear();
+            self.scanner.lock().tags.clear();
+            self.scanner.lock().images.clear();
             self.physics_simulator.node_positions.clear();
             self.physics_simulator.node_velocities.clear();
             self.initial_node_layout.clear();
@@ -2328,66 +2341,93 @@ impl<'a> FileGraphApp<'a> {
         }
     }
 
-    fn try_load_file_content(&mut self, path: PathBuf, ctx: &egui::Context) {
-        if is_pdf_path(&path) {
-            self.selected_file_content = Some("PDF Document".to_string());
-            self.selected_image = None;
+    fn try_load_file_content(
+        &mut self,
+        path: PathBuf,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+    ) {
+        if is_3d_object_path(&path) {
+            self.setup_wgpu(ctx, frame);
 
-            // Initialize PDF viewer state
-            self.pdf_viewer_state = PdfViewerState {
-                zoom_level: 1.0,
-                render_quality: RenderQuality::Normal,
-                page_cache: HashMap::new(),
-                page_render_sender: self.pdf_viewer_state.page_render_sender.take(),
-                page_render_receiver: self.pdf_viewer_state.page_render_receiver.take(),
-                ..Default::default()
-            };
-
-            // Load the first page
-            self.load_and_render_pdf_page(ctx, path.clone(), 0);
-
-            // Extract text in background
-            let path_clone = path.clone();
-            let ctx_clone = ctx.clone();
-            thread::spawn(move || {
-                match pdf_utils::extract_text_with_layout(&path_clone) {
-                    Ok(blocks) => {
-                        // Process text blocks and send back to UI thread
-                        ctx_clone.request_repaint();
+            if let (Some(device), Some(config)) = (&self.device, &self.surface_config) {
+                let mut viewer = GltfViewer::new(&**device, config);
+                match viewer.load_gltf(&path) {
+                    Ok(_) => {
+                        self.gltf_viewer = Some(viewer);
+                        self.selected_object_path = Some(path);
+                        self.show_3d_viewer = true;
+                        self.selected_file_content = None;
+                        self.selected_image = None;
                     }
                     Err(e) => {
-                        eprintln!("Failed to extract text: {}", e);
+                        self.selected_file_content =
+                            Some(format!("Failed to load 3D object: {}", e));
+                        self.gltf_viewer = None;
+                        self.show_3d_viewer = false;
                     }
                 }
-            });
-        } else if is_image_path(&path) {
-            match image::open(&path) {
-                Ok(img) => {
-                    let rgba_image = img.into_rgba8();
-                    let pixels: Vec<u8> = rgba_image.as_flat_samples().as_slice().to_vec();
-                    let image_size = [rgba_image.width() as _, rgba_image.height() as _];
-                    let image_data = egui::ColorImage::from_rgba_unmultiplied(image_size, &pixels);
-                    self.selected_image = Some(ctx.load_texture(
-                        path.to_string_lossy(),
-                        image_data,
-                        Default::default(),
-                    ));
-                    self.selected_file_content = None;
+            } else if is_pdf_path(&path) {
+                self.selected_file_content = Some("PDF Document".to_string());
+                self.selected_image = None;
+
+                // Initialize PDF viewer state
+                self.pdf_viewer_state = PdfViewerState {
+                    zoom_level: 1.0,
+                    render_quality: RenderQuality::Normal,
+                    page_cache: HashMap::new(),
+                    page_render_sender: self.pdf_viewer_state.page_render_sender.take(),
+                    page_render_receiver: self.pdf_viewer_state.page_render_receiver.take(),
+                    ..Default::default()
+                };
+
+                // Load the first page
+                self.load_and_render_pdf_page(ctx, path.clone(), 0);
+
+                // Extract text in background
+                let path_clone = path.clone();
+                let ctx_clone = ctx.clone();
+                thread::spawn(move || {
+                    match pdf_utils::extract_text_with_layout(&path_clone) {
+                        Ok(blocks) => {
+                            // Process text blocks and send back to UI thread
+                            ctx_clone.request_repaint();
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to extract text: {}", e);
+                        }
+                    }
+                });
+            } else if is_image_path(&path) {
+                match image::open(&path) {
+                    Ok(img) => {
+                        let rgba_image = img.into_rgba8();
+                        let pixels: Vec<u8> = rgba_image.as_flat_samples().as_slice().to_vec();
+                        let image_size = [rgba_image.width() as _, rgba_image.height() as _];
+                        let image_data =
+                            egui::ColorImage::from_rgba_unmultiplied(image_size, &pixels);
+                        self.selected_image = Some(ctx.load_texture(
+                            path.to_string_lossy(),
+                            image_data,
+                            Default::default(),
+                        ));
+                        self.selected_file_content = None;
+                    }
+                    Err(e) => {
+                        self.selected_file_content = Some(format!("Failed to load image: {}", e));
+                        self.selected_image = None;
+                    }
                 }
-                Err(e) => {
-                    self.selected_file_content = Some(format!("Failed to load image: {}", e));
-                    self.selected_image = None;
-                }
-            }
-        } else {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    self.selected_file_content = Some(content);
-                    self.selected_image = None;
-                }
-                Err(e) => {
-                    self.selected_file_content = Some(format!("Failed to read file: {}", e));
-                    self.selected_image = None;
+            } else {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        self.selected_file_content = Some(content);
+                        self.selected_image = None;
+                    }
+                    Err(e) => {
+                        self.selected_file_content = Some(format!("Failed to read file: {}", e));
+                        self.selected_image = None;
+                    }
                 }
             }
         }
@@ -2744,6 +2784,79 @@ impl<'a> FileGraphApp<'a> {
         }
     }
 
+    fn setup_wgpu(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.device.is_none() {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                // Store the render state
+                self.egui_wgpu_render_state = Some(render_state.clone());
+
+                // Extract device and queue from render state
+                self.device = Some(render_state.device.clone().into());
+                self.queue = Some(render_state.queue.clone().into());
+
+                self.surface_config = None;
+
+                // Initialize WGPU renderer
+                self.wgpu_renderer = Some(Renderer::new(
+                    &render_state.device,
+                    render_state.target_format,
+                    None,
+                    1,
+                    false,
+                ));
+            }
+        }
+    }
+
+    fn render_3d_viewer(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+    ) {
+        if let (Some(viewer), Some(renderer), Some(device), Some(queue), Some(config)) = (
+            &mut self.gltf_viewer,
+            &mut self.wgpu_renderer,
+            &self.device,
+            &self.queue,
+            &self.surface_config,
+        ) {
+            let screen_descriptor = ScreenDescriptor {
+                size_in_pixels: [ui.available_width() as u32, ui.available_height() as u32],
+                pixels_per_point: ctx.pixels_per_point(),
+            };
+
+            let delta_time = ctx.input(|i| i.unstable_dt);
+            viewer.update(delta_time);
+
+            // custom painter for 3D rendering
+            let (response, custom_painter) =
+                ui.allocate_painter(ui.available_size(), Sense::hover());
+
+            // 3D rendering callback
+            // ctx.add_custom_paint_cmd(custom_painter.clip_rect(), move |render_ctx| {
+            //     let mut rpass = render_ctx.rpass.begin();
+            //     viewer.render(&mut rpass);
+            // });
+
+            // Add controls for the 3D viewer
+            ui.horizontal(|ui| {
+                if ui.button("Reset View").clicked() {
+                    if let Some(viewer) = &mut self.gltf_viewer {
+                        viewer.rotation = Quat::IDENTITY;
+                    }
+                }
+
+                if ui.button("Close").clicked() {
+                    self.show_3d_viewer = false;
+                    self.gltf_viewer = None;
+                }
+
+                ui.label("3D viewer placeholder - WGPU integration required");
+            });
+        }
+    }
+
     fn draw_graph_and_handle_interactions(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::drag());
 
@@ -2779,7 +2892,7 @@ impl<'a> FileGraphApp<'a> {
                                     true
                                 } else {
                                     if let Some(path) = PathBuf::from(name).canonicalize().ok() {
-                                        self.scanner.lock().unwrap().tags.get(&path).map_or(
+                                        self.scanner.lock().tags.get(&path).map_or(
                                             false,
                                             |file_tags| {
                                                 file_tags.iter().any(|tag| {

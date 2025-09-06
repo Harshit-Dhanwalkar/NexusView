@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Sender, TryRecvError};
 /// Scans directories and extracts file relationships and tags
 pub struct FileScanner {
     root_path: PathBuf,
-    current_scan_path: PathBuf,
+    pub current_scan_path: PathBuf,
     pub show_hidden: bool,
     pub files: HashMap<PathBuf, Vec<PathBuf>>, // Maps files to their links
     pub images: Vec<PathBuf>,                  // List of image files
