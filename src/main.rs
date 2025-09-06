@@ -2,8 +2,16 @@
 use eframe::{NativeOptions, egui};
 use std::path::PathBuf;
 
-use crate::lib::ui::FileGraphApp;
-mod lib;
+mod lib {
+    pub mod file_scan;
+    pub mod graph;
+    pub mod physics_nodes;
+    pub mod ui;
+    pub mod utils;
+    pub mod viewer;
+}
+
+use lib::ui::FileGraphApp;
 
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = std::env::args().collect();
@@ -26,6 +34,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         app_name,
         options,
-        Box::new(|_cc| Ok(Box::new(FileGraphApp::new(scan_dir)))),
+        Box::new(|cc| Ok(Box::new(FileGraphApp::new(scan_dir, cc)))),
     )
 }

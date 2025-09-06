@@ -1,7 +1,7 @@
 // src/graph.rs
 use crate::lib::file_scan;
+use petgraph::graph::NodeIndex; //Graph
 use petgraph::stable_graph::StableGraph;
-use petgraph::{Graph, graph::NodeIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
 

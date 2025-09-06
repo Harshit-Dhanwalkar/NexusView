@@ -43,11 +43,10 @@ pub fn rotate_vec2(vec: egui::Vec2, angle_radians: f32) -> egui::Vec2 {
 pub mod pdf_utils {
     use pdf::error::PdfError;
     use pdf::file::FileOptions;
-    use pdf::object::*;
-    use pdf::object::*;
-    use pdf::primitive::PdfString;
+    // use pdf::object::*;
+    // use pdf::primitive::PdfString;
     use pdf_extract::OutputError;
-    use pdf_extract::content::Operation;
+    // use pdf_extract::content::Operation;
     use std::fmt;
     use std::path::Path;
 
@@ -116,7 +115,7 @@ pub mod pdf_utils {
 
         for (page_num, page) in file.pages().enumerate() {
             let page = page?;
-            if let Some(content) = &page.contents {
+            if let Some(_content) = &page.contents {
                 // let content = content.decode::<Vec<u8>>()?;
                 // let content_str = String::from_utf8_lossy(&content);
 

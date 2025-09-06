@@ -29,6 +29,7 @@ gltf = "1.4.1"            # glTF loader for 3d objects
 # wgpu = "26.0.1"           # rust graphics API
 glam = "0.28.0"           # 3D math library for games and graphics
 bytemuck = "1.21.0"
+type-map = "0.5.1"        # Provides a typemap container with FxHashMap
 
 [features]
 default = []

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender, TryRecvError};
+use std::sync::mpsc::Sender; // TryRecvError
 
 /// Scans directories and extracts file relationships and tags
 pub struct FileScanner {
@@ -130,9 +130,9 @@ impl FileScanner {
     }
 
     /// Processes an individual file to extract links and tags
-    fn process_file(&mut self, path: &Path, content: &str) -> Result<(), io::Error> {
+    fn process_file(&mut self, path: &Path, _content: &str) -> Result<(), io::Error> {
         if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if let Some(_ext) = path.extension().and_then(|e| e.to_str()) {
                 if is_image_path(path) {
                     self.files.insert(path.to_path_buf(), Vec::new());
                     self.images.push(path.to_path_buf());

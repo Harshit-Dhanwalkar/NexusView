@@ -2,7 +2,7 @@
 use egui::Vec2;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
-use rayon::prelude::*;
+// use rayon::prelude::*;
 use std::collections::HashMap;
 
 use crate::lib::graph::GraphNode;
@@ -181,12 +181,12 @@ impl PhysicsSimulator {
 
     pub fn update_positions(&mut self) {}
 
-    pub fn apply_forces(&mut self, nodes: &[NodeIndex], graph: &StableGraph<GraphNode, ()>) {}
+    pub fn apply_forces(&mut self, _nodes: &[NodeIndex], _graph: &StableGraph<GraphNode, ()>) {}
 
     pub fn initialize_positions_from_graph(
         &mut self,
-        graph: &StableGraph<GraphNode, ()>,
-        center: egui::Vec2,
+        _graph: &StableGraph<GraphNode, ()>,
+        _center: egui::Vec2,
     ) {
     }
 }
