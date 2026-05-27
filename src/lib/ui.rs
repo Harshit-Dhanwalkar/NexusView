@@ -297,6 +297,7 @@ pub struct FileGraphApp<'a> {
     tag_filter_input: String,
     initial_node_layout: HashMap<petgraph::graph::NodeIndex, egui::Vec2>,
     graph_center_offset: egui::Vec2,
+    graph_dirty: bool,
     graph_zoom_factor: f32,
     dragged_node: Option<petgraph::graph::NodeIndex>,
     last_drag_pos: Option<egui::Pos2>,
@@ -322,7 +323,8 @@ pub struct FileGraphApp<'a> {
     scan_thread_handle: Option<thread::JoinHandle<()>>,
     cancel_sender: Option<std::sync::mpsc::Sender<()>>,
     state: AppState,
-    // pdfium_instance: Arc<Pdfium>,
+    pdfium: Option<Arc<Pdfium>>,
+    pdfium_instance: Arc<Pdfium>,
     pdf_viewer_state: PdfViewerState,
     pdf_file_data: HashMap<PathBuf, FileData<'a>>,
     show_pdf_text: bool,
@@ -374,6 +376,7 @@ impl<'a> App for FileGraphApp<'a> {
                 self.scan_status = status;
                 if progress >= 1.0 {
                     self.is_scanning = false;
+                    self.graph_dirty = true;
                 }
                 ctx.request_repaint();
             }
@@ -384,30 +387,35 @@ impl<'a> App for FileGraphApp<'a> {
 
         // Update graph building progress
         {
-            let scanner_locked = self.scanner.lock();
+            if self.graph_dirty {
+                let scanner_locked = self.scanner.lock();
 
-            self.graph_build_progress = 0.0;
-            self.graph_build_status = "Building file graph...".to_string();
-            ctx.request_repaint();
+                // self.graph_build_progress = 0.0;
+                // self.graph_build_status = "Building file graph...".to_string();
+                // ctx.request_repaint();
 
-            // Clear old graphs before rebuilding
-            self.file_graph.graph.clear();
-            self.file_graph.node_indices.clear();
-            self.file_graph.build_from_scanner(&scanner_locked);
+                // Clear old graphs before rebuilding
+                self.file_graph.graph.clear();
+                self.file_graph.node_indices.clear();
+                self.file_graph.build_from_scanner(&scanner_locked);
 
-            self.graph_build_progress = 0.5;
-            self.graph_build_status = "Building tag graph...".to_string();
-            ctx.request_repaint();
+                // self.graph_build_progress = 0.5;
+                // self.graph_build_status = "Building tag graph...".to_string();
+                // ctx.request_repaint();
 
-            // Clear old tag graph before rebuilding
-            self.tag_graph.graph.clear();
-            self.tag_graph.file_node_indices.clear();
-            self.tag_graph.tag_node_indices.clear();
-            self.tag_graph.image_node_indices.clear();
-            self.tag_graph.build_from_tags(&scanner_locked);
+                // Clear old tag graph before rebuilding
+                self.tag_graph.graph.clear();
+                self.tag_graph.file_node_indices.clear();
+                self.tag_graph.tag_node_indices.clear();
+                self.tag_graph.image_node_indices.clear();
+                self.tag_graph.build_from_tags(&scanner_locked);
 
-            self.graph_build_progress = 1.0;
-            self.graph_build_status = "Graph ready".to_string();
+                self.graph_dirty = false;
+                self.search_results.clear();
+                self.current_search_result = 0;
+                // self.graph_build_progress = 1.0;
+                // self.graph_build_status = "Graph ready".to_string();
+            }
         }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -641,7 +649,7 @@ impl<'a> App for FileGraphApp<'a> {
             });
 
         // Central panel
-        let _central_response = egui::CentralPanel::default()
+        let central_response = egui::CentralPanel::default()
             .frame(egui::Frame::default())
             .show(ctx, |ui| {
                 let available_width = if self.show_directory_panel {
@@ -1197,7 +1205,8 @@ impl<'a> App for FileGraphApp<'a> {
                         let mut should_close_menu = false;
 
                         let window_response = egui::Window::new("Node Actions")
-                            .id(egui::Id::new("right_click_node_menu").with(menu_node_idx))
+                            .id(egui::Id::new("right_click_node_menu"))
+                            .fixed_pos(menu_pos)
                             .default_pos(menu_pos)
                             .collapsible(false)
                             .resizable(false)
@@ -1368,12 +1377,12 @@ impl<'a> App for FileGraphApp<'a> {
         }
 
         // Right panel section
-        egui::SidePanel::right("file_content_panel")
+        egui::SidePanel::right("Content_panel")
             .resizable(true)
-            .min_width(200.0)
+            .min_width(400.0)
             .show_animated(ctx, self.show_content_panel, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("File Content");
+                    ui.heading("Content Preview");
                     if ui.button("▶").clicked() {
                         self.show_content_panel = !self.show_content_panel;
                     }
@@ -1577,9 +1586,16 @@ impl<'a> FileGraphApp<'a> {
             mpsc::channel::<(PathBuf, usize, egui::TextureHandle, usize)>();
 
         // Initialize PDFium once when the app starts
-        let _pdfium = Arc::new(Pdfium::new(
-            Pdfium::bind_to_system_library().expect("Failed to bind to system PDFium"),
-        ));
+        // let pdfium = Arc::new(Pdfium::new(
+        //     Pdfium::bind_to_system_library().expect("Failed to bind to system PDFium"),
+        // ));
+        let pdfium = Pdfium::bind_to_system_library()
+            .ok()
+            .map(|b| Arc::new(Pdfium::new(b)));
+
+        if pdfium.is_none() {
+            eprintln!("PDFium not found — PDF preview disabled. See README for setup.");
+        }
 
         let wgpu_render_state = match &cc.wgpu_render_state {
             Some(state) => state,
@@ -1624,6 +1640,7 @@ impl<'a> FileGraphApp<'a> {
                     show_content_panel: true,
                     tag_filter_input: String::new(),
                     initial_node_layout: HashMap::new(),
+                    graph_dirty: true,
                     graph_center_offset: egui::Vec2::ZERO,
                     graph_zoom_factor: 1.0,
                     dragged_node: None,
@@ -1650,6 +1667,8 @@ impl<'a> FileGraphApp<'a> {
                     cancel_sender: None,
                     scan_thread_handle: None,
                     state: AppState::Idle,
+                    pdfium: pdfium.clone(),
+                    pdfium_instance: pdfium.expect("Pdfium context is required to initialize FileGraphApp"),
                     pdf_file_data: HashMap::new(),
                     pdf_viewer_state: PdfViewerState {
                         zoom_level: 1.0,
@@ -1709,6 +1728,7 @@ impl<'a> FileGraphApp<'a> {
             selected_image: None,
             tag_filter_input: String::new(),
             initial_node_layout: HashMap::new(),
+            graph_dirty: false,
             graph_center_offset: egui::Vec2::ZERO,
             graph_zoom_factor: 1.0,
             dragged_node: None,
@@ -1738,7 +1758,8 @@ impl<'a> FileGraphApp<'a> {
             scan_thread_handle: None,
             state: AppState::Idle,
             pdf_file_data: HashMap::new(),
-            // pdfium_instance: pdfium,
+            pdfium: pdfium.clone(), 
+            pdfium_instance: pdfium.expect("Pdfium context is required"),
             pdf_viewer_state: PdfViewerState {
                 zoom_level: 1.0,
                 render_quality: RenderQuality::Normal,
@@ -1776,10 +1797,10 @@ impl<'a> FileGraphApp<'a> {
     fn trigger_scan(&mut self, path_to_scan: PathBuf, ctx: &egui::Context) {
         self.cancel_scan();
 
-        if self.state == AppState::Scanning {
-            eprintln!("Already scanning, ignoring new scan request.");
-            return;
-        }
+        // if self.state == AppState::Scanning {
+        //     eprintln!("Already scanning, ignoring new scan request.");
+        //     return;
+        // }
 
         if !path_to_scan.is_dir() {
             self.state = AppState::Error("Selected path is not a directory".to_string());
@@ -1795,22 +1816,30 @@ impl<'a> FileGraphApp<'a> {
 
         self.clear_graph_data();
 
-        let (cancel_sender, cancel_receiver) = std::sync::mpsc::channel();
-        let (_progress_sender, progress_receiver) = std::sync::mpsc::channel();
+        let (cancel_sender, cancel_receiver) = std::sync::mpsc::channel::<()>();
+        let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
 
         self.cancel_sender = Some(cancel_sender);
         self.scan_progress_receiver = Some(progress_receiver);
 
         let scanner_arc_clone = self.scanner.clone();
         let ctx_clone = ctx.clone();
-        let _show_hidden_clone = self.show_hidden_files;
+        let show_hidden = self.show_hidden_files;
 
         self.scan_thread_handle = Some(thread::spawn(move || {
             if cancel_receiver.try_recv().is_ok() {
                 return;
             }
 
-            let _scanner_guard = scanner_arc_clone.lock();
+            let mut scanner = scanner_arc_clone.lock();
+            scanner.set_show_hidden(show_hidden);
+            scanner.files.clear();
+            scanner.tags.clear();
+            scanner.images.clear();
+
+            if let Err(e) = scanner.scan_directory_with_progress(&path_to_scan, progress_sender) {
+                eprintln!("Scan error: {}", e);
+            }
             ctx_clone.request_repaint();
         }));
     }
@@ -1863,6 +1892,16 @@ impl<'a> FileGraphApp<'a> {
     }
 
     fn load_and_render_pdf_page(&mut self, ctx: &egui::Context, path: PathBuf, page_idx: usize) {
+        let pdfium = match &self.pdfium {
+            Some(p) => p.clone(),
+            None => {
+                self.pdf_viewer_state.error = Some(
+                    "PDF preview requires libpdfium.so. See README.".to_string()
+                );
+                return;
+            }
+        };
+
         // Check cache first
         if let Some(texture) = self.pdf_viewer_state.page_cache.get(&page_idx) {
             self.pdf_viewer_state.rendered_page_texture = Some(texture.clone());
@@ -2512,6 +2551,10 @@ impl<'a> FileGraphApp<'a> {
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
     ) {
+        self.selected_file_content = None;
+        self.selected_image = None;
+        self.show_3d_viewer = false;
+
         if is_3d_object_path(&path) {
             self.setup_wgpu(frame);
 
@@ -2522,77 +2565,75 @@ impl<'a> FileGraphApp<'a> {
                         self.gltf_viewer = Some(viewer);
                         self.selected_object_path = Some(path);
                         self.show_3d_viewer = true;
-                        self.selected_file_content = None;
-                        self.selected_image = None;
                     }
                     Err(e) => {
                         self.selected_file_content =
                             Some(format!("Failed to load 3D object: {}", e));
-                        self.gltf_viewer = None;
-                        self.show_3d_viewer = false;
-                    }
-                }
-            } else if is_pdf_path(&path) {
-                self.selected_file_content = Some("PDF Document".to_string());
-                self.selected_image = None;
-
-                // Initialize PDF viewer state
-                self.pdf_viewer_state = PdfViewerState {
-                    zoom_level: 1.0,
-                    render_quality: RenderQuality::Normal,
-                    page_cache: HashMap::new(),
-                    page_render_sender: self.pdf_viewer_state.page_render_sender.take(),
-                    page_render_receiver: self.pdf_viewer_state.page_render_receiver.take(),
-                    ..Default::default()
-                };
-
-                // Load the first page
-                self.load_and_render_pdf_page(ctx, path.clone(), 0);
-
-                // Extract text in background
-                let path_clone = path.clone();
-                let ctx_clone = ctx.clone();
-                thread::spawn(move || {
-                    match pdf_utils::extract_text_with_layout(&path_clone) {
-                        Ok(_blocks) => {
-                            // Process text blocks and send back to UI thread
-                            ctx_clone.request_repaint();
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to extract text: {}", e);
-                        }
-                    }
-                });
-            } else if is_image_path(&path) {
-                match image::open(&path) {
-                    Ok(img) => {
-                        let rgba_image = img.into_rgba8();
-                        let pixels: Vec<u8> = rgba_image.as_flat_samples().as_slice().to_vec();
-                        let image_size = [rgba_image.width() as _, rgba_image.height() as _];
-                        let image_data =
-                            egui::ColorImage::from_rgba_unmultiplied(image_size, &pixels);
-                        self.selected_image = Some(ctx.load_texture(
-                            path.to_string_lossy(),
-                            image_data,
-                            Default::default(),
-                        ));
-                        self.selected_file_content = None;
-                    }
-                    Err(e) => {
-                        self.selected_file_content = Some(format!("Failed to load image: {}", e));
-                        self.selected_image = None;
                     }
                 }
             } else {
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        self.selected_file_content = Some(content);
-                        self.selected_image = None;
-                    }
-                    Err(e) => {
-                        self.selected_file_content = Some(format!("Failed to read file: {}", e));
-                        self.selected_image = None;
-                    }
+                self.selected_file_content = Some(
+                    "3D viewer requires WGPU to be initialized.".to_string()
+                );
+            }
+        } else if is_pdf_path(&path) {
+            // self.selected_file_content = Some("PDF Document".to_string());
+            // Initialize PDF viewer state
+            self.pdf_viewer_state = PdfViewerState {
+                zoom_level: 1.0,
+                render_quality: RenderQuality::Normal,
+                page_cache: HashMap::new(),
+                page_render_sender: self.pdf_viewer_state.page_render_sender.take(),
+                page_render_receiver: self.pdf_viewer_state.page_render_receiver.take(),
+                ..Default::default()
+            };
+
+            self.pdf_viewer_state.current_pdf_path = Some(path.clone());
+            // Load the first page
+            self.load_and_render_pdf_page(ctx, path.clone(), 0);
+
+            // // Extract text in background
+            // let path_clone = path.clone();
+            // let ctx_clone = ctx.clone();
+            // thread::spawn(move || {
+            //     match pdf_utils::extract_text_with_layout(&path_clone) {
+            //         Ok(_blocks) => {
+            //             // Process text blocks and send back to UI thread
+            //             ctx_clone.request_repaint();
+            //         }
+            //         Err(e) => {
+            //             eprintln!("Failed to extract text: {}", e);
+            //         }
+            //     }
+            // });
+        } else if is_image_path(&path) {
+            match image::open(&path) {
+                Ok(img) => {
+                    let rgba = img.into_rgba8();
+                    let size = [rgba.width() as _, rgba.height() as _];
+                    let pixels: Vec<u8> = rgba.as_flat_samples().as_slice().to_vec();
+                    let image_data = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+                    // let rgba_image = img.into_rgba8();
+                    // let image_size = [rgba_image.width() as _, rgba_image.height() as _];
+                    // let pixels: Vec<u8> = rgba_image.as_flat_samples().as_slice().to_vec();
+                    // let image_data = egui::ColorImage::from_rgba_unmultiplied(image_size, &pixels);
+                    self.selected_image = Some(ctx.load_texture(
+                        path.to_string_lossy(),
+                        image_data,
+                        Default::default(),
+                    ));
+                }
+                Err(e) => {
+                    self.selected_file_content = Some(format!("Failed to load image: {}", e));
+                }
+            }
+        } else {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    self.selected_file_content = Some(content);
+                }
+                Err(e) => {
+                    self.selected_file_content = Some(format!("Failed to read file: {}", e));
                 }
             }
         }
@@ -2632,10 +2673,11 @@ impl<'a> FileGraphApp<'a> {
 
     fn focus_on_node(&mut self, node_idx: NodeIndex) {
         if let Some(&node_pos) = self.physics_simulator.get_node_position(node_idx) {
-            let _current_center_offset = self.graph_center_offset;
-            let target_center_offset = -node_pos; // Center the node at (0,0) in graph coordinates
-            self.graph_center_offset = target_center_offset;
-            self.graph_zoom_factor = 1.0; // Reset zoom to default
+            // let current_center_offset = self.graph_center_offset;
+            // let target_center_offset = -node_pos; // Center the node at (0,0) in graph coordinates
+            // self.graph_center_offset = target_center_offset;
+            // self.graph_zoom_factor = 1.0; // Reset zoom to default
+            self.graph_center_offset = -(node_pos * self.graph_zoom_factor);
         }
     }
 

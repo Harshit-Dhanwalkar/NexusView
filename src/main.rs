@@ -1,5 +1,6 @@
 // src/main.rs
-use eframe::{NativeOptions, egui};
+use eframe::{egui, NativeOptions};
+use egui_extras::syntax_highlighting;
 use std::path::PathBuf;
 
 mod lib {
